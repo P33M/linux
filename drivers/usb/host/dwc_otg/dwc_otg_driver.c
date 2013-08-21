@@ -56,6 +56,7 @@
 #include "dwc_otg_core_if.h"
 #include "dwc_otg_pcd_if.h"
 #include "dwc_otg_hcd_if.h"
+#include "dwc_otg_fiq_fsm.h"
 
 #define DWC_DRIVER_VERSION	"3.00a 10-AUG-2012"
 #define DWC_DRIVER_DESC		"HS OTG USB Controller driver"
@@ -64,7 +65,6 @@ bool microframe_schedule=true;
 
 static const char dwc_driver_name[] = "dwc_otg";
 
-extern void* dummy_send;
 
 extern int pcd_init(
 #ifdef LM_INTERFACE
@@ -241,9 +241,9 @@ static struct dwc_otg_driver_module_params dwc_otg_module_params = {
 };
 
 //Global variable to switch the fiq fix on or off (declared in bcm2708.c)
-extern bool fiq_fix_enable;
+bool fiq_enable;
 // Global variable to enable the split transaction fix
-bool fiq_split_enable = true;
+bool fiq_fsm_enable = false;
 //Global variable to switch the nak holdoff on or off
 bool nak_holdoff_enable = true;
 
@@ -690,7 +690,7 @@ static int dwc_otg_driver_probe(
 	int retval = 0;
 	dwc_otg_device_t *dwc_otg_device;
         int devirq;
-
+    FLAME_ON(23);
 	dev_dbg(&_dev->dev, "dwc_otg_driver_probe(%p)\n", _dev);
 #ifdef LM_INTERFACE
 	dev_dbg(&_dev->dev, "start=0x%08x\n", (unsigned)_dev->resource.start);
@@ -800,7 +800,7 @@ static int dwc_otg_driver_probe(
 	dwc_otg_device->os_dep.base = ioremap_nocache(_dev->resource[0].start,
                                                       _dev->resource[0].end -
                                                       _dev->resource[0].start+1);
-	if (fiq_fix_enable)
+	if (fiq_enable)
 	{
 		if (!request_mem_region(_dev->resource[1].start,
 	                                _dev->resource[1].end - _dev->resource[1].start + 1,
@@ -808,12 +808,11 @@ static int dwc_otg_driver_probe(
 	          dev_dbg(&_dev->dev, "error reserving mapped memory\n");
 	          retval = -EFAULT;
 	          goto fail;
-	}
+		}
 
 		dwc_otg_device->os_dep.mphi_base = ioremap_nocache(_dev->resource[1].start,
 							    _dev->resource[1].end -
 							    _dev->resource[1].start + 1);
-		dummy_send = (void *) kmalloc(16, GFP_ATOMIC);
 	}
 
 #else
@@ -972,7 +971,7 @@ static int dwc_otg_driver_probe(
 	pci_set_drvdata(_dev, dwc_otg_device);
 	dwc_otg_device->os_dep.pcidev = _dev;
 #endif
-
+	FLAME_OFF(23);
 	/*
 	 * Enable the global interrupt after all the interrupt
 	 * handlers are installed if there is no ADP support else 
@@ -1071,9 +1070,9 @@ static int __init dwc_otg_driver_init(void)
 	int error;
         struct device_driver *drv;
 
-	if(fiq_split_enable && !fiq_fix_enable) {
-		printk(KERN_WARNING "dwc_otg: fiq_split_enable was set without fiq_fix_enable! Correcting.\n");
-		fiq_fix_enable = 1;
+	if(fiq_fsm_enable && !fiq_enable) {
+		printk(KERN_WARNING "dwc_otg: fiq_fsm_enable was set without fiq_enable! Correcting.\n");
+		fiq_enable = 1;
 	}
 
 	printk(KERN_INFO "%s: version %s (%s bus)\n", dwc_driver_name,
@@ -1095,9 +1094,9 @@ static int __init dwc_otg_driver_init(void)
 		printk(KERN_ERR "%s retval=%d\n", __func__, retval);
 		return retval;
 	}
-	printk(KERN_DEBUG "dwc_otg: FIQ %s\n", fiq_fix_enable ? "enabled":"disabled");
+	printk(KERN_DEBUG "dwc_otg: FIQ %s\n", fiq_enable ? "enabled":"disabled");
 	printk(KERN_DEBUG "dwc_otg: NAK holdoff %s\n", nak_holdoff_enable ? "enabled":"disabled");
-	printk(KERN_DEBUG "dwc_otg: FIQ split fix %s\n", fiq_split_enable ? "enabled":"disabled");
+	printk(KERN_DEBUG "dwc_otg: FIQ split-transaction FSM %s\n", fiq_fsm_enable ? "enabled":"disabled");
 
 	error = driver_create_file(drv, &driver_attr_version);
 #ifdef DEBUG
@@ -1378,12 +1377,12 @@ MODULE_PARM_DESC(otg_ver, "OTG revision supported 0=OTG 1.3 1=OTG 2.0");
 module_param(microframe_schedule, bool, 0444);
 MODULE_PARM_DESC(microframe_schedule, "Enable the microframe scheduler");
 
-module_param(fiq_fix_enable, bool, 0444);
-MODULE_PARM_DESC(fiq_fix_enable, "Enable the fiq fix");
+module_param(fiq_enable, bool, 0444);
+MODULE_PARM_DESC(fiq_enable, "Enable the FIQ");
 module_param(nak_holdoff_enable, bool, 0444);
 MODULE_PARM_DESC(nak_holdoff_enable, "Enable the NAK holdoff");
-module_param(fiq_split_enable, bool, 0444);
-MODULE_PARM_DESC(fiq_split_enable, "Enable the FIQ fix on split transactions");
+module_param(fiq_fsm_enable, bool, 0444);
+MODULE_PARM_DESC(fiq_fsm_enable, "Enable the FIQ to perform all split transactions");
 
 /** @page "Module Parameters"
  *

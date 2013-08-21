@@ -45,7 +45,7 @@
 
 #include "dwc_otg_hcd.h"
 #include "dwc_otg_regs.h"
-#include "dwc_otg_mphi_fix.h"
+#include "dwc_otg_fiq_fsm.h"
 
 extern bool microframe_schedule, nak_holdoff_enable;
 
@@ -57,12 +57,6 @@ static int last_sel_trans_num_avail_hc_at_start = 0;
 static int last_sel_trans_num_avail_hc_at_end = 0;
 #endif /* DEBUG_HOST_CHANNELS */
 
-extern int g_next_sched_frame, g_np_count, g_np_sent;
-
-extern haint_data_t haint_saved;
-extern hcintmsk_data_t hcintmsk_saved[MAX_EPS_CHANNELS];
-extern hcint_data_t hcint_saved[MAX_EPS_CHANNELS];
-extern gintsts_data_t ginsts_saved;
 
 dwc_otg_hcd_t *dwc_otg_hcd_alloc_hcd(void)
 {
@@ -295,7 +289,7 @@ static int32_t dwc_otg_hcd_disconnect_cb(void *p)
 	 */
 	dwc_otg_hcd->flags.b.port_connect_status_change = 1;
 	dwc_otg_hcd->flags.b.port_connect_status = 0;
-	if(fiq_fix_enable)
+	if(fiq_enable)
 		local_fiq_disable();
 	/*
 	 * Shutdown any transfers in process by clearing the Tx FIFO Empty
@@ -392,20 +386,20 @@ static int32_t dwc_otg_hcd_disconnect_cb(void *p)
 				channel->qh = NULL;
 			}
 		}
-		if(fiq_split_enable) {
+		if(fiq_fsm_enable) {
 			for(i=0; i < 128; i++) {
 				dwc_otg_hcd->hub_port[i] = 0;
 			}
-			haint_saved.d32 = 0;
+//			haint_saved.d32 = 0;
 			for(i=0; i < MAX_EPS_CHANNELS; i++) {
-				hcint_saved[i].d32 = 0;
-				hcintmsk_saved[i].d32 = 0;
+//				hcint_saved[i].d32 = 0;
+//				hcintmsk_saved[i].d32 = 0;
 			}
 		}
 
 	}
 
-	if(fiq_fix_enable)
+	if(fiq_enable)
 		local_fiq_enable();
 
 	if (dwc_otg_hcd->fops->disconnect) {
@@ -748,7 +742,6 @@ static void completion_tasklet_func(void *ptr)
 
 		usb_hcd_giveback_urb(hcd->priv, urb, urb->status);
 
-		fiq_print(FIQDBG_PORTHUB, "COMPLETE");
 
 		DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
 	}
@@ -896,6 +889,7 @@ static void dwc_otg_hcd_free(dwc_otg_hcd_t * dwc_otg_hcd)
 	DWC_TIMER_FREE(dwc_otg_hcd->conn_timer);
 	DWC_TASK_FREE(dwc_otg_hcd->reset_tasklet);
 	DWC_TASK_FREE(dwc_otg_hcd->completion_tasklet);
+	DWC_FREE(dwc_otg_hcd->fiq_state);
 
 #ifdef DWC_DEV_SRPCAP
 	if (dwc_otg_hcd->core_if->power_down == 2 &&
@@ -966,6 +960,27 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 #endif
 		DWC_DEBUGPL(DBG_HCDV, "HCD Added channel #%d, hc=%p\n", i,
 			    channel);
+	}
+
+	if (fiq_enable) {
+		hcd->fiq_state = DWC_ALLOC(sizeof(struct fiq_state));
+		if (!hcd->fiq_state) {
+			retval = -DWC_E_NO_MEMORY;
+			DWC_ERROR("%s: cannot allocate fiq_state structure\n", __func__);
+			dwc_otg_hcd_free(hcd);
+			goto out;
+		}
+		hcd->fiq_stack = DWC_ALLOC(sizeof(struct fiq_stack));
+		if (!hcd->fiq_stack) {
+			retval = -DWC_E_NO_MEMORY;
+			DWC_ERROR("%s: cannot allocate fiq_stack structure\n", __func__);
+			dwc_otg_hcd_free(hcd);
+			goto out;
+		}
+		//hcd->fiq_state->mphi_regs_base = DWC_ALLOC(sizeof(mphi_regs_t));
+		if (fiq_fsm_enable) {
+			// Allocate the rest of the crud
+		}
 	}
 
 	/* Initialize the Connection timeout timer. */
@@ -1165,7 +1180,7 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		hc->do_split = 1;
 		hc->xact_pos = qtd->isoc_split_pos;
 		/* We don't need to do complete splits anymore */
-		if(fiq_split_enable)
+		if(fiq_fsm_enable)
 			hc->complete_split = qtd->complete_split = 0;
 		else
 			hc->complete_split = qtd->complete_split;
@@ -1326,14 +1341,14 @@ int dwc_otg_hcd_allocate_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 {
 	uint32_t hub_addr, port_addr;
 
-	if(!fiq_split_enable)
+	if(!fiq_fsm_enable)
 		return 0;
 
 	hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
 
 	if(hcd->hub_port[hub_addr] & (1 << port_addr))
 	{
-		fiq_print(FIQDBG_PORTHUB, "H%dP%d:S%02d", hub_addr, port_addr, qh->skip_count);
+		fiq_print(FIQDBG_PORTHUB, hcd->fiq_state, "H%dP%d:S%02d", hub_addr, port_addr, qh->skip_count);
 
 		qh->skip_count++;
 
@@ -1350,7 +1365,7 @@ int dwc_otg_hcd_allocate_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 	{
 		qh->skip_count = 0;
 		hcd->hub_port[hub_addr] |= 1 << port_addr;
-		fiq_print(FIQDBG_PORTHUB, "H%dP%d:A %d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
+		fiq_print(FIQDBG_PORTHUB, hcd->fiq_state, "H%dP%d:A %d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
 #ifdef FIQ_DEBUG
 		hcd->hub_port_alloc[hub_addr * 16 + port_addr] = dwc_otg_hcd_get_frame_number(hcd);
 #endif
@@ -1361,7 +1376,7 @@ void dwc_otg_hcd_release_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 {
 	uint32_t hub_addr, port_addr;
 
-	if(!fiq_split_enable)
+	if(!fiq_fsm_enable)
 		return;
 
 	hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
@@ -1370,7 +1385,7 @@ void dwc_otg_hcd_release_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 #ifdef FIQ_DEBUG
 	hcd->hub_port_alloc[hub_addr * 16 + port_addr] = -1;
 #endif
-	fiq_print(FIQDBG_PORTHUB, "H%dP%d:RO%d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
+	fiq_print(FIQDBG_PORTHUB, hcd->fiq_state, "H%dP%d:RO%d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
 
 }
 
@@ -1420,7 +1435,7 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 				if(dwc_otg_hcd_allocate_port(hcd, qh))
 				{
 					qh_ptr = DWC_LIST_NEXT(qh_ptr);
-					g_next_sched_frame = dwc_frame_num_inc(dwc_otg_hcd_get_frame_number(hcd), 1);
+					hcd->fiq_state->next_sched_frame = dwc_frame_num_inc(dwc_otg_hcd_get_frame_number(hcd), 1);
 					continue;
 				}
 			}
@@ -1483,7 +1498,7 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 				 * but if this behaviour is changed then periodic endpoints will get a slower
 				 * polling rate.
 				 */
-				g_next_sched_frame = ((qh->nak_frame + 8) & ~7) & DWC_HFNUM_MAX_FRNUM;
+				hcd->fiq_state->next_sched_frame = ((qh->nak_frame + 8) & ~7) & DWC_HFNUM_MAX_FRNUM;
 				qh_ptr = DWC_LIST_NEXT(qh_ptr);
 				continue;
 			} else {
@@ -1516,7 +1531,7 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 				   &qh->qh_list_entry);
 		DWC_SPINUNLOCK_IRQRESTORE(channel_lock, flags);
 
-		g_np_sent++;
+		hcd->fiq_state->np_sent++;
 
 		if (!microframe_schedule)
 			hcd->non_periodic_channels++;
@@ -1647,10 +1662,10 @@ static void process_periodic_channels(dwc_otg_hcd_t * hcd)
 
 		// Do not send a split start transaction any later than frame .6
 		// Note, we have to schedule a periodic in .5 to make it go in .6
-		if(fiq_split_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
+		if(fiq_fsm_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
 		{
 			qh_ptr = qh_ptr->next;
-			g_next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
+			hcd->fiq_state->next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
 			continue;
 		}
 
@@ -1786,9 +1801,9 @@ static void process_non_periodic_channels(dwc_otg_hcd_t * hcd)
 
 		// Do not send a split start transaction any later than frame .5
 		// non periodic transactions will start immediately in this uframe
-		if(fiq_split_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
+		if(fiq_fsm_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
 		{
-			g_next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
+			hcd->fiq_state->next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
 			break;
 		}
 

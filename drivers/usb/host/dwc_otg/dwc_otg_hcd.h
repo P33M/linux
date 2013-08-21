@@ -40,6 +40,9 @@
 #include "dwc_otg_core_if.h"
 #include "dwc_list.h"
 #include "dwc_otg_cil.h"
+#include "dwc_otg_fiq_fsm.h"
+
+
 
 /**
  * @file
@@ -585,6 +588,8 @@ struct dwc_otg_hcd {
 	/** Frame List DMA address */
 	dma_addr_t frame_list_dma;
 
+	struct fiq_stack *fiq_stack;
+	struct fiq_state *fiq_state;
 #ifdef DEBUG
 	uint32_t frrem_samples;
 	uint64_t frrem_accum;

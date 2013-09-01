@@ -963,7 +963,7 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 	}
 
 	if (fiq_enable) {
-		hcd->fiq_state = DWC_ALLOC(sizeof(struct fiq_state));
+		hcd->fiq_state = DWC_ALLOC(sizeof(struct fiq_state) + (sizeof(struct fiq_channel_state) * num_channels));
 		if (!hcd->fiq_state) {
 			retval = -DWC_E_NO_MEMORY;
 			DWC_ERROR("%s: cannot allocate fiq_state structure\n", __func__);
@@ -978,9 +978,6 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 			goto out;
 		}
 		//hcd->fiq_state->mphi_regs_base = DWC_ALLOC(sizeof(mphi_regs_t));
-		if (fiq_fsm_enable) {
-			// Allocate the rest of the crud
-		}
 	}
 
 	/* Initialize the Connection timeout timer. */

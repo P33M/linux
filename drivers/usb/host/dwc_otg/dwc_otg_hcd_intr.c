@@ -498,6 +498,7 @@ int32_t dwc_otg_hcd_handle_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	gintsts_data_t gintsts;
 	gintmsk_data_t gintmsk;
 	hfnum_data_t hfnum;
+	haintmsk_data_t haintmsk;
 	FLAME_ON(23);
 #ifdef DEBUG
 	dwc_otg_core_global_regs_t *global_regs = core_if->core_global_regs;
@@ -518,7 +519,13 @@ int32_t dwc_otg_hcd_handle_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 		/* Pull in from the FIQ's disabled mask */
 		gintmsk.d32 = gintmsk.d32 | ~(dwc_otg_hcd->fiq_state->gintmsk_saved.d32);
 		dwc_otg_hcd->fiq_state->gintmsk_saved.d32 = ~0;
+
+		if (fiq_fsm_enable && ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint))
+			/* We need to cock around with HAINT because the FIQ will not mask the top-level */
+			gintsts.b.hcintr = 1;
+
 		gintsts.d32 &= gintmsk.d32;
+
 		local_fiq_enable();
 		if (!gintsts.d32) {
 			goto exit_handler_routine;
@@ -607,19 +614,23 @@ exit_handler_routine:
 		local_fiq_disable();
 		/* The FIQ could have sneaked another interrupt in. If so, don't clear MPHI */
 		if (dwc_otg_hcd->fiq_state->gintmsk_saved.d32 == ~0) {
-			/* Clear the MPHI interrupt */
-			DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.intstat, (1<<16));
-			if (dwc_otg_hcd->fiq_state->mphi_int_count >= 30) {
-				DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl, ((1<<31) + (1<<16)));
-				while (!(DWC_READ_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl) & (1 << 17)))
-					;
-				DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl, (1<<31));
-				dwc_otg_hcd->fiq_state->mphi_int_count = 0;
-			}
-			int_done++;
+		//	if(fiq_fsm_enable && ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint)) {
+				/* Clear the MPHI interrupt */
+				DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.intstat, (1<<16));
+				if (dwc_otg_hcd->fiq_state->mphi_int_count >= 50) {
+					DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl, ((1<<31) + (1<<16)));
+					while (!(DWC_READ_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl) & (1 << 17)))
+						;
+					DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl, (1<<31));
+					dwc_otg_hcd->fiq_state->mphi_int_count = 0;
+				}
+				int_done++;
+		//	}
 		}
+		haintmsk.d32 = DWC_READ_REG32(&core_if->host_if->host_global_regs->haintmsk);
 		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQOUT  ");
 		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintmsk.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haintmsk.d32);
 		/* Re-enable interrupts that the FIQ masked (first time round) */
 		FIQ_WRITE(dwc_otg_hcd->fiq_state->dwc_regs_base + GINTMSK, gintmsk.d32);
 		local_fiq_enable();
@@ -727,7 +738,7 @@ int32_t dwc_otg_hcd_handle_sof_intr(dwc_otg_hcd_t * hcd)
 		}
 	}
 
-	g_next_sched_frame = next_sched_frame;
+	hcd->fiq_state->next_sched_frame = next_sched_frame;
 
 	tr_type = dwc_otg_hcd_select_transactions(hcd);
 	if (tr_type != DWC_OTG_TRANSACTION_NONE) {
@@ -1015,6 +1026,7 @@ int32_t dwc_otg_hcd_handle_hc_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	int i;
 	int retval = 0;
 	haint_data_t haint;
+	haintmsk_data_t haintmsk = { .d32 = 0 };
 
 	/* Clear appropriate bits in HCINTn to clear the interrupt bit in
 	 * GINTSTS */
@@ -1024,15 +1036,21 @@ int32_t dwc_otg_hcd_handle_hc_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	// Overwrite with saved interrupts from fiq handler
 	if(fiq_fsm_enable)
 	{
+		/* check the mask? */
 		local_fiq_disable();
-		haint.d32 = haint_saved.d32;
-		haint_saved.d32 = 0;
+		haint.b2.chint |= ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint);
+		dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint = ~0;
 		local_fiq_enable();
 	}
 
 	for (i = 0; i < dwc_otg_hcd->core_if->core_params->host_channels; i++) {
 		if (haint.b2.chint & (1 << i)) {
 			retval |= dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd, i);
+			if (fiq_fsm_enable) {
+				haintmsk.d32 = DWC_READ_REG32(&dwc_otg_hcd->core_if->host_if->host_global_regs->haintmsk);
+				haintmsk.b2.chint |= (1 << i);
+				DWC_WRITE_REG32(&dwc_otg_hcd->core_if->host_if->host_global_regs->haintmsk, haintmsk.d32);
+			}
 		}
 	}
 
@@ -1319,9 +1337,7 @@ static void release_channel(dwc_otg_hcd_t * hcd,
 	int free_qtd;
 	dwc_irqflags_t flags;
 	dwc_spinlock_t *channel_lock = hcd->channel_lock;
-#if 1
-	int endp = qtd->urb ? qtd->urb->pipe_info.ep_num : 0;
-#endif
+
 	int hog_port = 0;
 
 	DWC_DEBUGPL(DBG_HCDV, "  %s: channel %d, halt_status %d, xfer_len %d\n",
@@ -1427,7 +1443,7 @@ cleanup:
 #ifdef FIQ_DEBUG
 			hcd->hub_port_alloc[hc->hub_addr * 16 + hc->port_addr] = -1;
 #endif
-			fiq_print(FIQDBG_PORTHUB, hcd->fiq_state, "H%dP%d:RR%d", hc->hub_addr, hc->port_addr, endp);
+//			fiq_print(FIQDBG_PORTHUB, hcd->fiq_state, "H%dP%d:RR%d", hc->hub_addr, hc->port_addr, endp);
 		}
 	}
 

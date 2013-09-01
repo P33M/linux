@@ -471,17 +471,34 @@ int hcd_init(dwc_bus_dev_t *_dev)
 			goto error2;
 		}
 		dwc_otg_hcd->fiq_state->dummy_send = DWC_ALLOC_ATOMIC(16);
-		DWC_WARN("FIQ at 0x%08x", dwc_otg_fiq_nop);
+		DWC_WARN("FIQ at 0x%08x", (fiq_fsm_enable ? dwc_otg_fiq_fsm : dwc_otg_fiq_nop));
 		DWC_WARN("FIQ ASM at 0x%08x length %d", &_dwc_otg_fiq_stub, (&_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub));
 		dwc_otg_hcd->fiq_state->gintmsk_saved.d32 = ~0;
+		dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint = ~0;
 		dwc_otg_hcd->fiq_stack->magic1 = 0xdeadbeef;
 		dwc_otg_hcd->fiq_stack->magic2 = 0xaa995566;
-		set_fiq_handler((void *)&_dwc_otg_fiq_stub, 32);
+
+		if (fiq_fsm_enable) {
+			int i;
+			for (i=0; i < dwc_otg_hcd->core_if->core_params->host_channels; i++) {
+				dwc_otg_hcd->fiq_state->channel[i].fsm = FIQ_PASSTHROUGH;
+			}
+		}
+
+		set_fiq_handler((void *) &_dwc_otg_fiq_stub, &_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub);
 		memset(&regs,0,sizeof(regs));
+
 		regs.ARM_r8 = (long) dwc_otg_hcd->fiq_state;
-		regs.ARM_r9 = (long) 0;
-		regs.ARM_sp = (long) dwc_otg_hcd->fiq_stack + sizeof(struct fiq_stack) - 8;
-		regs.ARM_fp = (long) dwc_otg_fiq_nop;
+		if (fiq_fsm_enable) {
+			regs.ARM_r9 = dwc_otg_hcd->core_if->core_params->host_channels;
+			//regs.ARM_r10 = dwc_otg_hcd->dma;
+			regs.ARM_fp = (long) dwc_otg_fiq_fsm;
+		} else {
+			regs.ARM_fp = (long) dwc_otg_fiq_nop;
+		}
+
+		regs.ARM_sp = (long) dwc_otg_hcd->fiq_stack + (sizeof(struct fiq_stack) - 4);
+
 //		__show_regs(&regs);
 		set_fiq_regs(&regs);
 

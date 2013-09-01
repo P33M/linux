@@ -111,20 +111,20 @@ struct fiq_stack {
 	int magic2;
 };
 
-//struct fiq_channel_state {
-//	enum fiq_fsm_state fsm;
-//	unsigned int nr_errors;
-//	unsigned int hub_addr;
-//	unsigned int port_addr;
-//	/* in/out for communicating number of dma buffers used, or number of ISOC to do */
-//	unsigned int nrpackets;
-//	/* copies of registers - in/out communication from/to IRQ handler */
-//	hcchar_data_t hcchar_copy;
-//	hcsplt_data_t hcsplt_copy;
-//	hcint_data_t hcint_copy;
-//	hcintmsk_data_t hcintmsk_copy;
-//	hctsiz_data_t hctsiz_copy;
-//};
+struct fiq_channel_state {
+	enum fiq_fsm_state fsm;
+	unsigned int nr_errors;
+	unsigned int hub_addr;
+	unsigned int port_addr;
+	/* in/out for communicating number of dma buffers used, or number of ISOC to do */
+	unsigned int nrpackets;
+	/* copies of registers - in/out communication from/to IRQ handler */
+	hcchar_data_t hcchar_copy;
+	hcsplt_data_t hcsplt_copy;
+	hcint_data_t hcint_copy;
+	hcintmsk_data_t hcintmsk_copy;
+	hctsiz_data_t hctsiz_copy;
+};
 
 struct fiq_state {
 	/* To allow the mphi peripheral to send stuff */
@@ -135,7 +135,7 @@ struct fiq_state {
 	void *dummy_send;
 	/* for communicating unhandled interrupts back to the IRQ on FIQ exit */
 	gintmsk_data_t gintmsk_saved;
-//	haint_data_t haint_saved;
+	haintmsk_data_t haintmsk_saved;
 	unsigned int np_count;
 	unsigned int np_sent;
 	unsigned int next_sched_frame;
@@ -144,7 +144,7 @@ struct fiq_state {
 	unsigned int bufsiz;
 #endif
 	/* HCD will allocate fiq_channel_state[nr_channels] */
-//	struct fiq_channel_state channel[0];
+	struct fiq_channel_state channel[0];
 };
 
 /* set of 188-byte DMA bounce buffers for split transactions. Simple array used for speed. */
@@ -233,10 +233,7 @@ struct fiq_state {
 //
 //void dwc_otg_fiq_fsm(int num_channels, struct fiq_state *state, struct fiq_perchannel_dma *dma);
 //
-//int fiq_fsm_do_sof(int num_channels, struct fiq_state *state);
-//
-//int fiq_fsm_do_hcintr(int num_channels, int channel, struct fiq_state *state,
-//			struct fiq_perchannel_dma *dma);
+extern void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels);
 
 extern void dwc_otg_fiq_nop(struct fiq_state *state);
 

@@ -28,10 +28,8 @@ ENTRY(_dwc_otg_fiq_stub)
 
 	/* for fiq NOP mode - just need state */
 	mov r0, r8;
-	/* r8 = num_channels */
-//	mov r0, r8;
-	/* r9 = struct *fiq_state */
-//	mov r1, r9;
+	/* r9 = num_channels */
+	mov r1, r9;
 	/* r10 = struct *dma_bufs */
 //	mov r2, r10;
 

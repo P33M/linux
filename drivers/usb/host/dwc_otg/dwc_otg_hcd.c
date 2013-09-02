@@ -1177,7 +1177,8 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		hc->do_split = 1;
 		hc->xact_pos = qtd->isoc_split_pos;
 		/* We don't need to do complete splits anymore */
-		if(fiq_fsm_enable)
+//		if(fiq_fsm_enable)
+		if (0)
 			hc->complete_split = qtd->complete_split = 0;
 		else
 			hc->complete_split = qtd->complete_split;

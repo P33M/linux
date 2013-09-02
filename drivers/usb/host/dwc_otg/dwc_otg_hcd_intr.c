@@ -520,9 +520,12 @@ int32_t dwc_otg_hcd_handle_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 		gintmsk.d32 = gintmsk.d32 | ~(dwc_otg_hcd->fiq_state->gintmsk_saved.d32);
 		dwc_otg_hcd->fiq_state->gintmsk_saved.d32 = ~0;
 
-		if (fiq_fsm_enable && ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint))
+		if (fiq_fsm_enable && ( 0x0000FFFF & ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint))) {
 			/* We need to cock around with HAINT because the FIQ will not mask the top-level */
+//			fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQHCINT");
+//			fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint));
 			gintsts.b.hcintr = 1;
+		}
 
 		gintsts.d32 &= gintmsk.d32;
 
@@ -628,9 +631,9 @@ exit_handler_routine:
 		//	}
 		}
 		haintmsk.d32 = DWC_READ_REG32(&core_if->host_if->host_global_regs->haintmsk);
-		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQOUT  ");
-		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintmsk.d32);
-		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haintmsk.d32);
+//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQOUT  ");
+//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintmsk.d32);
+//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haintmsk.d32);
 		/* Re-enable interrupts that the FIQ masked (first time round) */
 		FIQ_WRITE(dwc_otg_hcd->fiq_state->dwc_regs_base + GINTMSK, gintmsk.d32);
 		local_fiq_enable();
@@ -1038,19 +1041,22 @@ int32_t dwc_otg_hcd_handle_hc_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	{
 		/* check the mask? */
 		local_fiq_disable();
+//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQHAINT");
+//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haint.d32);
 		haint.b2.chint |= ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint);
 		dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint = ~0;
+//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haint.d32);
 		local_fiq_enable();
 	}
 
 	for (i = 0; i < dwc_otg_hcd->core_if->core_params->host_channels; i++) {
 		if (haint.b2.chint & (1 << i)) {
 			retval |= dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd, i);
-			if (fiq_fsm_enable) {
-				haintmsk.d32 = DWC_READ_REG32(&dwc_otg_hcd->core_if->host_if->host_global_regs->haintmsk);
-				haintmsk.b2.chint |= (1 << i);
-				DWC_WRITE_REG32(&dwc_otg_hcd->core_if->host_if->host_global_regs->haintmsk, haintmsk.d32);
-			}
+//			if (fiq_fsm_enable) {
+//				haintmsk.d32 = DWC_READ_REG32(&dwc_otg_hcd->core_if->host_if->host_global_regs->haintmsk);
+//				haintmsk.b2.chint |= (1 << i);
+//				DWC_WRITE_REG32(&dwc_otg_hcd->core_if->host_if->host_global_regs->haintmsk, haintmsk.d32);
+//			}
 		}
 	}
 
@@ -2687,15 +2693,15 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 		    hcint.d32, hcintmsk.d32, (hcint.d32 & hcintmsk.d32));
 	hcint.d32 = hcint.d32 & hcintmsk.d32;
 
-	if(fiq_fsm_enable)
-	{
-		// replace with the saved interrupts from the fiq handler
-		local_fiq_disable();
-		hcint_orig.d32 = hcint_saved[num].d32;
-		hcint.d32 = hcint_orig.d32 & hcintmsk_saved[num].d32;
-		hcint_saved[num].d32 = 0;
-		local_fiq_enable();
-	}
+//	if(fiq_fsm_enable)
+//	{
+//		// replace with the saved interrupts from the fiq handler
+//		local_fiq_disable();
+//		hcint_orig.d32 = hcint_saved[num].d32;
+//		hcint.d32 = hcint_orig.d32 & hcintmsk_saved[num].d32;
+//		hcint_saved[num].d32 = 0;
+//		local_fiq_enable();
+//	}
 
 	if (!dwc_otg_hcd->core_if->dma_enable) {
 		if (hcint.b.chhltd && hcint.d32 != 0x2) {

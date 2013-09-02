@@ -70,6 +70,9 @@ static inline int fiq_fsm_do_sof(int num_channels, struct fiq_state *state)
 	hfnum_data_t hfnum;
 	hfnum.d32 = FIQ_READ(state->dwc_regs_base + HFNUM);
 	/* Stub for now. Handle only SOF - FSM advancement comes later */
+//	fiq_print(FIQDBG_INT, state, "FIQSOF  ");
+//	fiq_print(FIQDBG_INT, state, "%03u%03u", state->np_count, state->np_sent);
+//	fiq_print(FIQDBG_INT, state, " %05u:%01u", state->next_sched_frame/8 , state->next_sched_frame % 8 );
 	if (state->np_count == state->np_sent &&
 			dwc_frame_num_gt(state->next_sched_frame, hfnum.b.frnum)) {
 		return 1;
@@ -100,11 +103,11 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 	gintmsk.d32 = FIQ_READ(state->dwc_regs_base + GINTMSK);
 	gintsts.d32 &= gintmsk.d32;
 
-	fiq_print(FIQDBG_INT, state, "FIQ     ");
-	fiq_print(FIQDBG_INT, state, "%08x", gintsts.d32);
-	fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
-	fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
-	fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
+//	fiq_print(FIQDBG_INT, state, "FIQ     ");
+//	fiq_print(FIQDBG_INT, state, "%08x", gintsts.d32);
+//	fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
+//	fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
+//	fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
 
 	if (gintsts.b.sofintr) {
 		if (fiq_fsm_do_sof(num_channels, state)) {
@@ -120,16 +123,18 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 		haint.d32 = FIQ_READ(state->dwc_regs_base + HAINT);
 		haintmsk.d32 = FIQ_READ(state->dwc_regs_base + HAINTMSK);
 		haint.d32 &= haintmsk.d32;
+		haint_handled.d32 = 0;
 		for (i=0; i<num_channels; i++) {
 			if (haint.b2.chint & (1 << i)) {
-				fiq_print(FIQDBG_INT, state, "HCINT  %01d", i);
+//				fiq_print(FIQDBG_INT, state, "HCINT  %01d", i);
 				if(!fiq_fsm_do_hcintr(num_channels, i, state /*, dma */)) {
 					/* Not handled in FIQ
 					 * HAINT is level-sensitive, leading to level-sensitive HCINT bit.
 					 * Mask HAINT(i) but keep top-level hcint unmasked.
 					 */
-					fiq_print(FIQDBG_INT, state, "NO      ");
+//					fiq_print(FIQDBG_INT, state, "NO      ");
 					state->haintmsk_saved.b2.chint &= ~(1 << i);
+					haint_handled.b2.chint |= (1 << i);
 				} else {
 					/* not necessary */
 					//haint_handled.b2.chint |= (1 << i);
@@ -146,6 +151,7 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 			 */
 			haintmsk.d32 &= state->haintmsk_saved.d32;
 			FIQ_WRITE(state->dwc_regs_base + HAINTMSK, haintmsk.d32);
+			FIQ_WRITE(state->dwc_regs_base + HAINT, haint.d32);
 			kick_irq |= 1;
 		}
 		/* Top-Level interrupt - always handled because it's level-sensitive */
@@ -157,7 +163,7 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 	state->gintmsk_saved.d32 &= ~(gintsts.d32 & ~gintsts_handled.d32);
 
 	/* FIQ didn't handle something - mask has changed - write new mask */
-	if (gintmsk.d32 != state->gintmsk_saved.d32) {
+	if (gintmsk.d32 != (gintmsk.d32 & state->gintmsk_saved.d32)) {
 		gintmsk.d32 &= state->gintmsk_saved.d32;
 		FIQ_WRITE(state->dwc_regs_base + GINTMSK, gintmsk.d32);
 		kick_irq |= 1;
@@ -171,15 +177,17 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 	/* We got an interrupt, didn't handle it. */
 	if (kick_irq) {
 		state->mphi_int_count++;
-		fiq_print(FIQDBG_INT, state, "FIQ->IRQ");
-		fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
-		fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
-		fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
+//		fiq_print(FIQDBG_INT, state, "FIQ->IRQ");
+//		fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
+//		fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
+//		fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
 		FIQ_WRITE(state->mphi_regs.outdda, (int) state->dummy_send);
 		FIQ_WRITE(state->mphi_regs.outddb, (1<<29));
 
 	}
 	nrfiq++;
+	FLAME_OFF(24);
+	mb();
 }
 
 

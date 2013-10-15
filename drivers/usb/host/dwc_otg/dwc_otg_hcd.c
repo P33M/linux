@@ -855,6 +855,7 @@ static void dwc_otg_hcd_free(dwc_otg_hcd_t * dwc_otg_hcd)
 	qh_list_free(dwc_otg_hcd, &dwc_otg_hcd->periodic_sched_ready);
 	qh_list_free(dwc_otg_hcd, &dwc_otg_hcd->periodic_sched_assigned);
 	qh_list_free(dwc_otg_hcd, &dwc_otg_hcd->periodic_sched_queued);
+	tasklet_kill(dwc_otg_hcd->completion_tasklet);
 
 	/* Free memory for the host channels. */
 	for (i = 0; i < MAX_EPS_CHANNELS; i++) {

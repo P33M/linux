@@ -855,7 +855,6 @@ static void dwc_otg_hcd_free(dwc_otg_hcd_t * dwc_otg_hcd)
 	qh_list_free(dwc_otg_hcd, &dwc_otg_hcd->periodic_sched_ready);
 	qh_list_free(dwc_otg_hcd, &dwc_otg_hcd->periodic_sched_assigned);
 	qh_list_free(dwc_otg_hcd, &dwc_otg_hcd->periodic_sched_queued);
-	tasklet_kill(dwc_otg_hcd->completion_tasklet);
 
 	/* Free memory for the host channels. */
 	for (i = 0; i < MAX_EPS_CHANNELS; i++) {
@@ -971,6 +970,10 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 			dwc_otg_hcd_free(hcd);
 			goto out;
 		}
+		DWC_MEMSET(hcd->fiq_state, 0, (sizeof(struct fiq_state) + (sizeof(struct fiq_channel_state) * num_channels)));
+		for (i = 0; i < num_channels; i++) {
+			hcd->fiq_state->channel[i].fsm = FIQ_PASSTHROUGH;
+		}
 		hcd->fiq_stack = DWC_ALLOC(sizeof(struct fiq_stack));
 		if (!hcd->fiq_stack) {
 			retval = -DWC_E_NO_MEMORY;
@@ -978,6 +981,8 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 			dwc_otg_hcd_free(hcd);
 			goto out;
 		}
+		hcd->fiq_stack->magic1 = 0xDEADBEEF;
+		hcd->fiq_stack->magic2 = 0xD00DFEED;
 		//hcd->fiq_state->mphi_regs_base = DWC_ALLOC(sizeof(mphi_regs_t));
 	}
 
@@ -1325,6 +1330,16 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 
 	if (hcd->core_if->dma_desc_enable)
 		hc->desc_list_addr = qh->desc_list_dma;
+
+	{
+		/* quick and dirty hack for test */
+		hfnum_data_t hfnum = { .d32 = DWC_READ_REG32(&hcd->core_if->host_if->host_global_regs->hfnum) };
+		if ((hfnum.b.frrem & 0x0f) == 0) {
+			DWC_WARN("Starting FIQ_test on channel %d", hc->hc_num);
+			hcd->fiq_state->channel[hc->hc_num].fsm = FIQ_TEST;
+		}
+	}
+
 
 	dwc_otg_hc_init(hcd->core_if, hc);
 	hc->qh = qh;

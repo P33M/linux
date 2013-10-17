@@ -46,18 +46,7 @@ extern bool microframe_schedule;
  * This file contains the implementation of the HCD Interrupt handlers.
  */
 
-/*
- * Some globals to communicate between the FIQ and INTERRUPT
- */
-
-void * dummy_send;
 int fiq_done, int_done;
-
-
-hcchar_data_t nak_hcchar;
-hctsiz_data_t nak_hctsiz;
-hcsplt_data_t nak_hcsplt;
-int nak_count;
 
 #ifdef FIQ_DEBUG
 char buffer[1000*16];
@@ -964,6 +953,12 @@ static void release_channel(dwc_otg_hcd_t * hcd,
 				hog_port = 1;
 			}
 		}
+	}
+
+	{
+		/* hack for test */
+		hcd->fiq_state->channel[hc->hc_num].fsm = FIQ_PASSTHROUGH;
+		hcd->fiq_state->channel[hc->hc_num].nr_errors = 0;
 	}
 
 	switch (halt_status) {
@@ -2265,6 +2260,28 @@ static int32_t handle_hc_chhltd_intr(dwc_otg_hcd_t * hcd,
 	return 1;
 }
 
+/**
+ * dwc_otg_hcd_handle_hc_fsm() - handle an unmasked channel interrupt
+ * 				 from a channel handled in the FIQ
+ * @hcd:	Pointer to dwc_otg_hcd struct
+ * @num:	Host channel number
+ *
+ * If a host channel interrupt was received by the IRQ and this was a channel
+ * used by the FIQ, the execution flow for transfer completion is substantially
+ * different from the normal (messy) path. This function its friends handles
+ * channel cleanup and transaction completion from a FIQ transaction.
+ */
+int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
+{
+	struct fiq_channel_state *st = &hcd->fiq_state->channel[num];
+	int ret = 0;
+	if (st->fsm == FIQ_TEST) {
+		/* ha, it worked */
+		DWC_WARN("FIQ test on %d: success? %d", num, st->nr_errors);
+	}
+	return ret;
+}
+
 /** Handles interrupt for a specific Host Channel */
 int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 {
@@ -2276,6 +2293,15 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 	dwc_otg_qtd_t *qtd;
 
 	DWC_DEBUGPL(DBG_HCDV, "--Host Channel Interrupt--, Channel %d\n", num);
+
+	/*
+	 * FSM mode: Check to see if this is a HC interrupt from a channel handled by the FIQ.
+	 * Execution path is fundamentally different for the channels after a FIQ has completed
+	 * a split transaction.
+	 */
+	if (fiq_fsm_enable && (dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH)) {
+		dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd, num);
+	}
 
 	hc = dwc_otg_hcd->hc_ptr_array[num];
 	hc_regs = dwc_otg_hcd->core_if->host_if->hc_regs[num];
@@ -2294,16 +2320,6 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 		    "  hcint 0x%08x, hcintmsk 0x%08x, hcint&hcintmsk 0x%08x\n",
 		    hcint.d32, hcintmsk.d32, (hcint.d32 & hcintmsk.d32));
 	hcint.d32 = hcint.d32 & hcintmsk.d32;
-
-//	if(fiq_fsm_enable)
-//	{
-//		// replace with the saved interrupts from the fiq handler
-//		local_fiq_disable();
-//		hcint_orig.d32 = hcint_saved[num].d32;
-//		hcint.d32 = hcint_orig.d32 & hcintmsk_saved[num].d32;
-//		hcint_saved[num].d32 = 0;
-//		local_fiq_enable();
-//	}
 
 	if (!dwc_otg_hcd->core_if->dma_enable) {
 		if (hcint.b.chhltd && hcint.d32 != 0x2) {

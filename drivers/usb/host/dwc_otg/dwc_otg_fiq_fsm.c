@@ -1,31 +1,23 @@
 /*
- * dwc_otg_fiq_fsm.c
+ * dwc_otg_fiq_fsm.c - The finite state machine FIQ
  *
- *  Created on: 21 Aug 2013
- *      Author: jonathan
+ * Copyright (c) 2013 Raspberry Pi Foundation
+ *
+ * Author: Jonathan Bell <jonathan@raspberrypi.org>
+ *
+ * This FIQ implements functionality that performs split transactions on
+ * the dwc_otg hardware without any outside intervention. A split transaction
+ * is "queued" by nominating a specific host channel to perform the entirety
+ * of a split transaction. This FIQ will then perform the microframe-precise
+ * scheduling required in each phase of the transaction until completion.
+ *
+ * The FIQ functionality has been surgically implanted into the Synopsys
+ * vendor-provided driver.
+ *
  */
 
 #include "dwc_otg_fiq_fsm.h"
 
-//
-//void dwc_otg_fiq_fsm(int num_channels, struct fiq_state *state, struct fiq_perchannel_dma *dma)
-//{
-//
-//}
-//
-
-//int fiq_fsm_do_sof(int num_channels, struct fiq_state *state)
-//{
-//	return 0;
-//}
-
-//
-//int fiq_fsm_do_hcintr(int num_channels, int channel, struct fiq_state *state,
-//			 struct fiq_perchannel_dma *dma)
-//{
-//	return 0;
-//}
-//
 
 char buffer[1000*16];
 int wptr;
@@ -53,19 +45,10 @@ void _fiq_print(enum fiq_debug_level dbg_lvl, struct fiq_state *state, char *fmt
 }
 
 
-/* IRQ communication
- * Because both level and edge triggered interrupts are present in each of the registers
- * all the way down to the piece of hardware that triggered it (where they edge-triggered).
- * Because unhandled interrupts need to be communicated back to the IRQ, the only way to accomplish
- * this is to mask the triggered interrupt and pass both the & of the new mask with the old mask and the saved reg state.
- * The IRQ should then reenable the masked interrupts that have been saved after it has finished handling them.
- *
- */
-
 
 static int nrfiq = 0;
 
-static inline int fiq_fsm_do_sof(int num_channels, struct fiq_state *state)
+static inline int fiq_fsm_do_sof(struct fiq_state *state, int num_channels)
 {
 	hfnum_data_t hfnum;
 	hfnum.d32 = FIQ_READ(state->dwc_regs_base + HFNUM);
@@ -82,7 +65,20 @@ static inline int fiq_fsm_do_sof(int num_channels, struct fiq_state *state)
 }
 
 
-static inline int fiq_fsm_do_hcintr(int num_channels, int n, struct fiq_state *state /*, struct fiq_perchannel_dma *dma */) {
+static inline int fiq_fsm_do_hcintr(struct fiq_state *state, int num_channels, int n /*, struct fiq_perchannel_dma *dma */)
+{
+	if (state->channel[n].fsm == FIQ_PASSTHROUGH) {
+		/* Doesn't belong to us: kick it upstairs */
+		return 0;
+	}
+	switch (state->channel[n].fsm) {
+	case FIQ_TEST:
+		fiq_print(FIQDBG_INT, state, "HCTEST %d", n);
+		state->channel[n].nr_errors = 1;
+		return 0;
+	default:
+		break;
+	}
 	return 0;
 }
 
@@ -110,7 +106,7 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 //	fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
 
 	if (gintsts.b.sofintr) {
-		if (fiq_fsm_do_sof(num_channels, state)) {
+		if (fiq_fsm_do_sof(state, num_channels)) {
 			gintsts_handled.b.sofintr = 1;
 		} else {
 			state->gintmsk_saved.b.sofintr = 0;
@@ -126,17 +122,17 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 		haint_handled.d32 = 0;
 		for (i=0; i<num_channels; i++) {
 			if (haint.b2.chint & (1 << i)) {
-//				fiq_print(FIQDBG_INT, state, "HCINT  %01d", i);
-				if(!fiq_fsm_do_hcintr(num_channels, i, state /*, dma */)) {
-					/* Not handled in FIQ
-					 * HAINT is level-sensitive, leading to level-sensitive HCINT bit.
+				fiq_print(FIQDBG_INT, state, "HCINT  %01d", i);
+				if(!fiq_fsm_do_hcintr(state, num_channels, i /*, dma */)) {
+					/* HCINT was not handled in FIQ
+					 * HAINT is level-sensitive, leading to level-sensitive ginststs.b.hcint bit.
 					 * Mask HAINT(i) but keep top-level hcint unmasked.
 					 */
-//					fiq_print(FIQDBG_INT, state, "NO      ");
+					fiq_print(FIQDBG_INT, state, "NO      ");
 					state->haintmsk_saved.b2.chint &= ~(1 << i);
 					haint_handled.b2.chint |= (1 << i);
 				} else {
-					/* not necessary */
+					/* do_hcintr cleaned up after itself */
 					//haint_handled.b2.chint |= (1 << i);
 				}
 			}
@@ -191,7 +187,18 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 }
 
 
-/* Basic version of FIQ - only holds off SOF */
+/**
+ * dwc_otg_fiq_nop() - FIQ "lite"
+ * @state:	pointer to state struct passed from the banked FIQ mode registers.
+ *
+ * The "nop" handler does not intervene on any interrupts other than SOF.
+ * It is limited in scope to deciding at each SOF if the IRQ SOF handler (which deals
+ * with non-periodic/periodic queues) needs to be kicked.
+ *
+ * This is done to hold off the SOF interrupt, which occurs at a rate of 8000 per second.
+ *
+ * Return: void
+ */
 void dwc_otg_fiq_nop(struct fiq_state *state)
 {
 	gintsts_data_t gintsts, gintsts_handled;

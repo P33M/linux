@@ -4,7 +4,7 @@
  *  Created on: 21 Aug 2013
  *      Author: jonathan
  * Small stub that is copied directly to 0xFFFF001C - FIQ vector.
- * Brings out the FIQ Mode saved registers (which contain pointers
+ * Brings out the FIQ Mode banked registers (which contain pointers
  * to our FIQ state) and puts them in the right calling convention.
  */
 
@@ -25,7 +25,6 @@
   * r2 = &hcd->dma_buffers
   * Tramples: r0, r1, r2, r4, fp, ip
   */
-
 
 ENTRY(_dwc_otg_fiq_stub)
 	/* Stash unbanked regs - SP will have been set up for us */

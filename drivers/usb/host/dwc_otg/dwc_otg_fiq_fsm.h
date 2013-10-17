@@ -1,10 +1,19 @@
 /*
- * dwc_otg_fiq_fsm.h
+ * dwc_otg_fiq_fsm.h - Finite state machine FIQ header definitions
  *
- *  Created on: 21 Aug 2013
- *      Author: Jonathan Bell
- *      		jonathan@raspberrypi.org
- *      Structure and data definitions for the FSM-mode FIQ
+ * Copyright (c) 2013 Raspberry Pi Foundation
+ *
+ * Author: Jonathan Bell <jonathan@raspberrypi.org>
+ *
+ * This FIQ implements functionality that performs split transactions on
+ * the dwc_otg hardware without any outside intervention. A split transaction
+ * is "queued" by nominating a specific host channel to perform the entirety
+ * of a split transaction. This FIQ will then perform the microframe-precise
+ * scheduling required in each phase of the transaction until completion.
+ *
+ * The FIQ functionality has been surgically implanted into the Synopsys
+ * vendor-provided driver.
+ *
  */
 
 #ifndef DWC_OTG_FIQ_FSM_H_
@@ -38,13 +47,14 @@ writel(1<<x, __io_address(0x20200000+(0x28)));  \
 #define FIQ_WRITE(_addr_,_data_) (*(volatile unsigned int *) (_addr_) = (_data_))
 #define FIQ_READ(_addr_) (*(volatile unsigned int *) (_addr_))
 
-/* FIQ-ified register definitions */
+/* FIQ-ified register definitions. Offsets are from dwc_regs_base. */
 #define GINTSTS		0x014
 #define GINTMSK		0x018
 #define HFNUM		0x408
 #define HAINT		0x414
 #define HAINTMSK	0x418
 #define HPRT0		0x440
+/* HC_regs start from an offset of 0x500 */
 #define HC_START	0x500
 #define HC_OFFSET	0x020
 
@@ -88,6 +98,19 @@ extern void _fiq_print (enum fiq_debug_level dbg_lvl, struct fiq_state *state, c
 
 extern bool fiq_enable, nak_holdoff_enable, fiq_fsm_enable;
 
+
+/**
+ * enum fiq_fsm_state - The FIQ FSM states.
+ *
+ * This is the "core" of the FIQ FSM. Broadly, the FSM states follow the
+ * USB2.0 specification for host responses to various transaction states.
+ * There are modifications to this host state machine because of a variety of
+ * quirks and limitations in the dwc_otg hardware.
+ *
+ * The fsm state is also used to communicate back to the driver on completion of
+ * a split transaction. The end states are used in conjunction with the interrupts
+ * raised by the final transaction.
+ */
 enum fiq_fsm_state {
 	FIQ_PASSTHROUGH = (1<<1),
 	FIQ_SSPLIT_STARTED = (1<<2),
@@ -100,6 +123,7 @@ enum fiq_fsm_state {
 	FIQ_PER_SPLIT_FIN = (1<<9),
 	FIQ_NP_CSPLIT_NYET = (1<<10),
 	FIQ_SPLIT_ABORTED = (1<<31),
+	FIQ_TEST = (1<<16),
 #ifdef FIQ_DEBUG
 	FIQ_CHAN_DISABLED
 #endif
@@ -111,6 +135,25 @@ struct fiq_stack {
 	int magic2;
 };
 
+/**
+ * struct fiq_channel_state - FIQ state machine storage
+ * @fsm:	Current state of the channel as understood by the FIQ
+ * @nr_errors:	Number of transaction errors on this split-transaction
+ * @hub_addr:   SSPLIT/CSPLIT destination hub
+ * @port_addr:  SSPLIT/CSPLIT destination port - always 1 if single TT hub
+ * @nrpackets:  For isoc OUT, the number of split-OUT packets to transmit. For
+ * 		split-IN, number of CSPLIT data packets that were received.
+ * @hcchar_copy:
+ * @hcsplt_copy:
+ * @hcintmsk_copy:
+ * @hctsiz_copy:	Copies of the host channel registers. For use as scratch.
+ *
+ * The fiq_channel_state is state storage between interrupts for a host channel. The
+ * FSM state is stored here. Members of this structure must only be set up by the
+ * driver prior to enabling the FIQ for this host channel, and not touched until the FIQ
+ * has updated the state to either a COMPLETE state group or ABORT state group.
+ */
+
 struct fiq_channel_state {
 	enum fiq_fsm_state fsm;
 	unsigned int nr_errors;
@@ -118,7 +161,7 @@ struct fiq_channel_state {
 	unsigned int port_addr;
 	/* in/out for communicating number of dma buffers used, or number of ISOC to do */
 	unsigned int nrpackets;
-	/* copies of registers - in/out communication from/to IRQ handler */
+	/* copies of registers - in/out communication from/to IRQ handler and for ease of channel setup */
 	hcchar_data_t hcchar_copy;
 	hcsplt_data_t hcsplt_copy;
 	hcint_data_t hcint_copy;
@@ -126,14 +169,30 @@ struct fiq_channel_state {
 	hctsiz_data_t hctsiz_copy;
 };
 
+/**
+ * struct fiq_state - top-level FIQ state machine storage
+ * @mphi_regs:		virtual address of the MPHI peripheral register file
+ * @dwc_regs_base:	virtual address of the base of the DWC core register file
+ * @dummy_send:		Scratch area for sending a fake message to the MPHI peripheral
+ * @gintmsk_saved:	Top-level mask of interrupts that the FIQ has not handled.
+ * 			Used for determining which interrupts fired to set off the IRQ handler.
+ * @haintmsk_saved:	Mask of interrupts from host channels that the FIQ did not handle internally.
+ * @np_count:		Non-periodic transactions in the active queue
+ * @np_sent:		Count of non-periodic transactions that have completed
+ * @next_sched_frame:	For periodic transactions handled by the driver's SOF-driven queuing mechanism,
+ * 			this is the next frame on which a SOF interrupt is required. Used to hold off
+ * 			passing SOF through to the driver until necessary.
+ * @channel[n]:		Per-channel FIQ state. Allocated during init depending on the number of host
+ * 			channels configured into the core logic.
+ *
+ * This is passed as the first argument to the dwc_otg_fiq_fsm top-level FIQ handler from the asm stub.
+ * It contains top-level state information.
+ */
 struct fiq_state {
-	/* To allow the mphi peripheral to send stuff */
 	mphi_regs_t mphi_regs;
 	int mphi_int_count;
-	/* vaddr of DWC regs */
 	void *dwc_regs_base;
 	void *dummy_send;
-	/* for communicating unhandled interrupts back to the IRQ on FIQ exit */
 	gintmsk_data_t gintmsk_saved;
 	haintmsk_data_t haintmsk_saved;
 	unsigned int np_count;
@@ -143,31 +202,42 @@ struct fiq_state {
 	char * buffer;
 	unsigned int bufsiz;
 #endif
-	/* HCD will allocate fiq_channel_state[nr_channels] */
 	struct fiq_channel_state channel[0];
 };
 
-/* set of 188-byte DMA bounce buffers for split transactions. Simple array used for speed. */
-
-//struct fiq_dma_slot {
-//	u8 buf[188];
-//	/* number of bytes in the buffer actually used */
-//	int len;
-//};
-
-//struct fiq_perchannel_dma {
-//	/* we need at most 6 slots (max possible split-isoc OUT size) */
-//	struct fiq_dma_slot slot[6];
-//	/* for use mid-transaction, or to report that fewer than nrpackets were transferred */
-//	int index;
-//};
+/**
+ * struct fiq_dma_slot - a 188-byte DMA bounce buffer
+ * @buf:	Does what it says on the tin. 188 bytes is the maximum per-microframe split transaction
+ * 		data size.
+ * @len:	For OUT transfers, this is to be programmed into the host channel
+ * 		HCTSIZ register. For IN transfers, this is the actual amount of data received.
+ */
+struct fiq_dma_slot {
+	u8 buf[188];
+	int len;
+};
 
 
-//struct fiq_stub_glue {
-//	/* Hack: grab the linker-generated FIQ size for use in set_fiq_handler() */
-//	u32 length;
-//	u32 code[0];
-//};
+/**
+ * struct fiq_perchannel_dma - coherent DMA bounce buffer for a single host channel
+ * @slot[6]:	There can be up to 6 SSPLIT or CSPLIT transactions carrying data in/out
+ * 		per full-speed frame. Data to be transmitted OUT is written here by the driver
+ * 		for the FIQ to point the host channel's DMA to for each packet,
+ * 		and data transmitted IN is written to each of the slots in turn by
+ * 		the host channel's DMA.
+ * @index:	For OUT, the number of slots that have been filled with data to transmit.
+ * 		For IN, the number of slots that have received data.
+ *
+ * Each slot is 188 bytes of coherently allocated memory. The amount of data in each slot is variable,
+ * see the fiq_dma_slot struct.
+ */
+struct fiq_perchannel_dma {
+	/* we need at most 6 slots (max possible split-isoc OUT size) */
+	struct fiq_dma_slot slot[6];
+	/* for use mid-transaction, or to report that fewer than nrpackets were transferred */
+	int index;
+};
+
 
 /* HCD will dma_alloc_coherent the required memory, all-up DMA size is 9kiB for 8 host channels */
 

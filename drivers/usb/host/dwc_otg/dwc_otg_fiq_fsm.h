@@ -135,17 +135,33 @@ extern bool fiq_enable, nak_holdoff_enable, fiq_fsm_enable;
  * raised by the final transaction.
  */
 enum fiq_fsm_state {
-	FIQ_PASSTHROUGH = (1<<1),
-	FIQ_SSPLIT_STARTED = (1<<2),
-	FIQ_SSPLIT_RETRY = (1<<3),
-	FIQ_SSPLIT_DONE = (1<<4),
-	FIQ_PER_CSPLIT_WAIT = (1<<5),
-	FIQ_PER_CSPLIT_POLL = (1<<6),
-	FIQ_CSPLIT_FIRST_NYET = (1<<7),
-	FIQ_NP_SPLIT_FIN = (1<<8),
-	FIQ_PER_SPLIT_FIN = (1<<9),
-	FIQ_NP_CSPLIT_NYET = (1<<10),
-	FIQ_SPLIT_ABORTED = (1<<31),
+	/* FIQ isn't enabled for this host channel */
+	FIQ_PASSTHROUGH = (0<<0),
+
+	/* Nonperiodic state groups */
+	/* The SSPLIT has been sent from IRQ context. */
+	FIQ_NP_SSPLIT_STARTED = (1<<1),
+	/* NAK response (or previous highspeed error) received for SSPLIT */
+	FIQ_NP_SSPLIT_RETRY = (1<<2),
+	/* A nonperiodic CSPLIT resulted in a NYET, hold off until next SOF */
+	FIQ_NP_CSPLIT_NYET_RETRY = (1<<3),
+	/* nonperiodic split transaction completed without error */
+	FIQ_NP_SPLIT_DONE = (1<<4),
+	/* nonperiodic transaction failed to complete. IRQ has to decide whether to
+	 * issue a CLEAR_TT_BUFFER or retry
+	 */
+	FIQ_NP_SPLIT_ABORT,
+
+	/* Periodic state groups */
+	FIQ_PER_SSPLIT_QUEUED,
+	FIQ_PER_SSPLIT_STARTED,
+
+	FIQ_PER_CSPLIT_WAIT,
+	FIQ_PER_CSPLIT_POLL,
+
+	FIQ_PER_SPLIT_DONE,
+	FIQ_PER_SPLIT_ABORTED,
+
 	FIQ_TEST = (1<<16),
 #ifdef FIQ_DEBUG
 	FIQ_CHAN_DISABLED
@@ -169,7 +185,7 @@ struct fiq_stack {
  * @hcchar_copy:
  * @hcsplt_copy:
  * @hcintmsk_copy:
- * @hctsiz_copy:	Copies of the host channel registers. For use as scratch.
+ * @hctsiz_copy:	Copies of the host channel registers. For use as scratch, or for returning state.
  *
  * The fiq_channel_state is state storage between interrupts for a host channel. The
  * FSM state is stored here. Members of this structure must only be set up by the

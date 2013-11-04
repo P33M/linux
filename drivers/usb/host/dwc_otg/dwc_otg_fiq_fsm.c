@@ -37,6 +37,15 @@
  * The FIQ functionality has been surgically implanted into the Synopsys
  * vendor-provided driver.
  *
+ * NB: Large parts of this implementation have architecture-specific code.
+ * For porting this functionality to other ARM machines, the minimum is required:
+ * - An interrupt controller allowing the top-level dwc USB interrupt to be routed
+ *   to the FIQ
+ * - A method of forcing a software generated interrupt from FIQ mode that then
+ *   triggers an IRQ entry (with the dwc USB handler called by this IRQ number)
+ * - Guaranteed interrupt routing such that both the FIQ and SGI occur on the same
+ *   processor core - there is no locking between the FIQ and IRQ.
+ *
  */
 
 #include "dwc_otg_fiq_fsm.h"
@@ -67,10 +76,48 @@ void _fiq_print(enum fiq_debug_level dbg_lvl, struct fiq_state *state, char *fmt
         local_irq_restore(flags);
 }
 
-
+/*
+ * fiq_fsm_transaction_suitable() - Test a QH for compatibility with the FIQ
+ * @qh:	pointer to the endpoint's queue head
+ *
+ * Transaction start/end control flow is grafted onto the existing dwc_otg
+ * mechanisms, to avoid spaghettifying the functions more than they already are.
+ *
+ * Returns: 0 for unsuitable, 1 implies the FIQ can be enabled for this transaction.
+ */
+int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh)
+{
+	int ret = 0;
+	if (qh->do_split) {
+		/* nonperiodic for now */
+		if (qh->ep_type == UE_CONTROL || qh->ep_type == UE_BULK)
+			ret = 1;
+	}
+	return ret;
+}
 
 static int nrfiq = 0;
 
+
+/**
+ * fiq_fsm_do_sof() - FSM start-of-frame interrupt handler
+ * @state:	Pointer to the state struct passed from banked FIQ mode registers.
+ * @num_channels:	set according to the DWC hardware configuration
+ *
+ * The SOF handler in FSM mode has two functions
+ * 1. Hold off SOF from causing schedule advancement in IRQ context if there's
+ *    nothing to do
+ * 2. Advance certain FSM states that require either a microframe delay, or a microframe
+ *    of holdoff.
+ *
+ * The second part is architecture-specific to mach-bcm2835 -
+ * a sane interrupt controller would have a mask register for ARM interrupt sources
+ * to be promoted to the nFIQ line, but it doesn't. Instead a single interrupt
+ * number (USB) can be enabled. This means that certain parts of the USB specification
+ * that require "wait a little while, then issue another packet" cannot be fulfilled with
+ * the timing granularity required to achieve optimal throughout. The workaround is to use
+ * the SOF "timer" (125uS) to perform this task.
+ */
 static inline int fiq_fsm_do_sof(struct fiq_state *state, int num_channels)
 {
 	hfnum_data_t hfnum;
@@ -105,6 +152,23 @@ static inline int fiq_fsm_do_hcintr(struct fiq_state *state, int num_channels, i
 	return 0;
 }
 
+
+/**
+ * dwc_otg_fiq_fsm() - Flying State Machine (monster) FIQ
+ * @state:		pointer to state struct passed from the banked FIQ mode registers.
+ * @num_channels:	set according to the DWC hardware configuration
+ * @dma:		pointer to DMA bounce buffers for split transaction slots
+ *
+ * The FSM FIQ performs the low-level tasks that normally would be performed by the microcode
+ * inside an EHCI or similar host controller regarding split transactions. The DWC core
+ * interrupts each and every time a split transaction packet is received or sent successfully.
+ * This results in either an interrupt storm when everything is working "properly", or
+ * the interrupt latency of the system in general breaks time-sensitive periodic split
+ * transactions. Pushing the low-level, but relatively easy state machine work into the FIQ
+ * solves these problems.
+ *
+ * Return: void
+ */
 void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_perchannel_dma *dma */)
 {
 	gintsts_data_t gintsts, gintsts_handled;

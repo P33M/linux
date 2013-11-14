@@ -1414,6 +1414,101 @@ void dwc_otg_hcd_release_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
 
 }
 
+/**
+ * fiq_fsm_transaction_suitable() - Test a QH for compatibility with the FIQ
+ * @qh:	pointer to the endpoint's queue head
+ *
+ * Transaction start/end control flow is grafted onto the existing dwc_otg
+ * mechanisms, to avoid spaghettifying the functions more than they already are.
+ *
+ * Returns: 0 for unsuitable, 1 implies the FIQ can be enabled for this transaction.
+ */
+int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh)
+{
+	int ret = 0;
+	if (qh->do_split) {
+		/* nonperiodic for now */
+		if (qh->ep_type == UE_CONTROL
+			|| qh->ep_type == UE_BULK
+			// || qh->ep_type == UE_ISOCHRONOUS
+			// || qh->ep_type == UE_INTERRUPT
+			)
+			ret = 1;
+	} else if (qh->ep_type == UE_ISOCHRONOUS && qh->ep_is_in) {
+		// No HS isoc streaming support yet
+		ret = 0;
+	}
+	return ret;
+}
+
+
+/**
+ * fiq_fsm_queue_transaction() - Set up a host channel and FIQ state
+ * @hcd: Pointer to the dwc_otg_hcd struct
+ * @qh: Pointer to the endpoint's queue head
+ *
+ * This overrides the dwc_otg driver's normal method of queueing a transaction.
+ * Called from dwc_otg_hcd_queue_transactions(), this performs specific setup
+ * for the nominated host channel.
+ *
+ * For periodic transfers, it also peeks at the FIQ state to see if an immediate
+ * queue is possible. If not, then the FIQ is left to start the transfer.
+ */
+int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
+{
+	dwc_hc_t *hc = qh->channel;
+	/* Program HC registers, setup FIQ_state, examine FIQ if periodic, start transfer (not if uframe 5) */
+	int hub_addr, port_addr;
+	struct fiq_channel_state *st = &hcd->fiq_state->channel[qh->channel->hc_num];
+	st->nr_errors = 0;
+	st->hcchar_copy.b.mps = qh->channel->max_packet;
+	st->hcchar_copy.b.epdir = qh->channel->ep_is_in;
+	st->hcchar_copy.b.devaddr = qh->channel->dev_addr;
+	st->hcchar_copy.b.epnum = qh->channel->ep_num;
+	st->hcchar_copy.b.eptype = qh->channel->ep_type;
+	if (qh->channel->ep_type & 0x1)
+		// For periodic, always use the 3-strikes HS retry.
+		st->hcchar_copy.b.multicnt = 3;
+	else
+		st->hcchar_copy.b.multicnt = 0;
+
+	st->hcchar_copy.b.lspddev = (qh->channel->speed == DWC_OTG_EP_SPEED_LOW ? 1 : 0);
+	// Oddfrm is tricky.
+	st->hcchar_copy.b.oddfrm = dwc_otg_hcd_get_frame_number(hcd) & 0x1;
+
+	if(qh->do_split) {
+		hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
+		st->hcsplt_copy.b.compsplt = 0;
+		st->hcsplt_copy.b.spltena = 1;
+		// XACTPOS is for isoc-out only.
+		st->hcsplt_copy.b.xactpos = ISOC_XACTPOS_ALL;
+		if(qh->channel->ep_type == DWC_OTG_EP_TYPE_ISOC) {
+
+		}
+		st->hcsplt_copy.b.hubaddr = hub_addr;
+		st->hcsplt_copy.b.prtaddr = port_addr;
+	} else {
+		st->hcsplt_copy.d32 = 0;
+	}
+
+	st->hctsiz_copy.b.dopng = 0;
+	st->hctsiz_copy.b.pid = qh->channel->data_pid_start;
+	st->hctsiz_copy.b.pktcnt = 1;
+	st->hctsiz_copy.b.xfersize = qh->channel->xfer_len;
+	st->hctsiz_copy.b.pktcnt = 1; // Eh?
+
+	/* this is where it gets funky: Use the DMA bounce buffers. For IN transfers,
+	 * the DMA address is the address of the first 188byte slot buffer in the bounce buffer array.
+	 * For OUT transfers, we need to copy the data into the bounce buffer array so the FIQ can punt
+	 * the right address out as necessary. hc->xfer_buff and hc->xfer_len have already been set
+	 * in assign_and_init_hc(), but this is for the eventual transaction completion only. The FIQ
+	 * must not touch internal driver state.
+	 */
+
+
+	return 0;
+}
+
 
 /**
  * This function selects transactions from the HCD transfer schedule and
@@ -1658,7 +1753,7 @@ static void process_periodic_channels(dwc_otg_hcd_t * hcd)
 	hptxsts_data_t tx_status;
 	dwc_list_link_t *qh_ptr;
 	dwc_otg_qh_t *qh;
-	int status;
+	int status = 0;
 	int no_queue_space = 0;
 	int no_fifo_space = 0;
 
@@ -1694,20 +1789,24 @@ static void process_periodic_channels(dwc_otg_hcd_t * hcd)
 			continue;
 		}
 
-		/*
-		 * Set a flag if we're queuing high-bandwidth in slave mode.
-		 * The flag prevents any halts to get into the request queue in
-		 * the middle of multiple high-bandwidth packets getting queued.
-		 */
-		if (!hcd->core_if->dma_enable && qh->channel->multi_count > 1) {
-			hcd->core_if->queuing_high_bandwidth = 1;
-		}
-		status =
-		    queue_transaction(hcd, qh->channel,
-				      tx_status.b.ptxfspcavail);
-		if (status < 0) {
-			no_fifo_space = 1;
-			break;
+		if (fiq_fsm_enable && fiq_fsm_transaction_suitable(qh)) {
+			fiq_fsm_queue_transaction(hcd, qh);
+		} else {
+
+			/*
+			 * Set a flag if we're queueing high-bandwidth in slave mode.
+			 * The flag prevents any halts to get into the request queue in
+			 * the middle of multiple high-bandwidth packets getting queued.
+			 */
+			if (!hcd->core_if->dma_enable && qh->channel->multi_count > 1) {
+				hcd->core_if->queuing_high_bandwidth = 1;
+			}
+			status = queue_transaction(hcd, qh->channel,
+							tx_status.b.ptxfspcavail);
+			if (status < 0) {
+				no_fifo_space = 1;
+				break;
+			}
 		}
 
 		/*
@@ -1822,32 +1921,28 @@ static void process_non_periodic_channels(dwc_otg_hcd_t * hcd)
 		}
 
 		qh = DWC_LIST_ENTRY(hcd->non_periodic_qh_ptr, dwc_otg_qh_t,
-				    qh_list_entry);
+				qh_list_entry);
 
 		// Do not send a split start transaction any later than frame .5
 		// non periodic transactions will start immediately in this uframe
-		if(fiq_fsm_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
-		{
-			hcd->fiq_state->next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
-			break;
+		if(fiq_fsm_enable && fiq_fsm_transaction_suitable(qh)) {
+			fiq_fsm_queue_transaction(hcd, qh);
+		} else {
+			status = queue_transaction(hcd, qh->channel,
+						tx_status.b.nptxfspcavail);
+
+			if (status > 0) {
+				more_to_do = 1;
+			} else if (status < 0) {
+				no_fifo_space = 1;
+				break;
+			}
 		}
-
-		status =
-		    queue_transaction(hcd, qh->channel,
-				      tx_status.b.nptxfspcavail);
-
-		if (status > 0) {
-			more_to_do = 1;
-		} else if (status < 0) {
-			no_fifo_space = 1;
-			break;
-		}
-
 		/* Advance to next QH, skipping start-of-list entry. */
 		hcd->non_periodic_qh_ptr = hcd->non_periodic_qh_ptr->next;
 		if (hcd->non_periodic_qh_ptr == &hcd->non_periodic_sched_active) {
 			hcd->non_periodic_qh_ptr =
-			    hcd->non_periodic_qh_ptr->next;
+					hcd->non_periodic_qh_ptr->next;
 		}
 
 	} while (hcd->non_periodic_qh_ptr != orig_qh_ptr);
@@ -1908,7 +2003,6 @@ void dwc_otg_hcd_queue_transactions(dwc_otg_hcd_t * hcd,
 	if ((tr_type == DWC_OTG_TRANSACTION_PERIODIC ||
 	     tr_type == DWC_OTG_TRANSACTION_ALL) &&
 	    !DWC_LIST_EMPTY(&hcd->periodic_sched_assigned)) {
-
 		process_periodic_channels(hcd);
 	}
 

@@ -76,25 +76,6 @@ void _fiq_print(enum fiq_debug_level dbg_lvl, struct fiq_state *state, char *fmt
         local_irq_restore(flags);
 }
 
-/*
- * fiq_fsm_transaction_suitable() - Test a QH for compatibility with the FIQ
- * @qh:	pointer to the endpoint's queue head
- *
- * Transaction start/end control flow is grafted onto the existing dwc_otg
- * mechanisms, to avoid spaghettifying the functions more than they already are.
- *
- * Returns: 0 for unsuitable, 1 implies the FIQ can be enabled for this transaction.
- */
-int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh)
-{
-	int ret = 0;
-	if (qh->do_split) {
-		/* nonperiodic for now */
-		if (qh->ep_type == UE_CONTROL || qh->ep_type == UE_BULK)
-			ret = 1;
-	}
-	return ret;
-}
 
 static int nrfiq = 0;
 

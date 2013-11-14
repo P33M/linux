@@ -67,6 +67,10 @@ do {            \
 writel(1<<x, __io_address(0x20200000+(0x28)));  \
 } while (0)
 
+/* This is a quick-and-dirty arch-specific register read/write. We know that writes to a peripheral on BCM2835 will
+ * always arrive in-order, also that reads and writes are executed in-order therefore the need for memory barriers is
+ * obviated if we're only talking to USB.
+ */
 #define FIQ_WRITE(_addr_,_data_) (*(volatile unsigned int *) (_addr_) = (_data_))
 #define FIQ_READ(_addr_) (*(volatile unsigned int *) (_addr_))
 
@@ -89,10 +93,10 @@ writel(1<<x, __io_address(0x20200000+(0x28)));  \
 #define HCINTMSK	0x0C
 #define HCTSIZ		0x10
 
-#define ISOC_XACTPOS_ALL 	0x11
-#define ISOC_XACTPOS_BEGIN	0x10
-#define ISOC_XACTPOS_MID	0x00
-#define ISOC_XACTPOS_END	0x01
+#define ISOC_XACTPOS_ALL 	0b11
+#define ISOC_XACTPOS_BEGIN	0b10
+#define ISOC_XACTPOS_MID	0b00
+#define ISOC_XACTPOS_END	0b01
 
 typedef struct {
 	volatile void* base;
@@ -136,31 +140,37 @@ extern bool fiq_enable, nak_holdoff_enable, fiq_fsm_enable;
  */
 enum fiq_fsm_state {
 	/* FIQ isn't enabled for this host channel */
-	FIQ_PASSTHROUGH = (0<<0),
+	FIQ_PASSTHROUGH = 0,
 
 	/* Nonperiodic state groups */
 	/* The SSPLIT has been sent from IRQ context. */
-	FIQ_NP_SSPLIT_STARTED = (1<<1),
+	FIQ_NP_SSPLIT_STARTED = (1<<0),
 	/* NAK response (or previous highspeed error) received for SSPLIT */
-	FIQ_NP_SSPLIT_RETRY = (1<<2),
+	FIQ_NP_SSPLIT_RETRY = (1<<1),
 	/* A nonperiodic CSPLIT resulted in a NYET, hold off until next SOF */
-	FIQ_NP_CSPLIT_NYET_RETRY = (1<<3),
+	FIQ_NP_CSPLIT_NYET_RETRY = (1<<2),
 	/* nonperiodic split transaction completed without error */
-	FIQ_NP_SPLIT_DONE = (1<<4),
+	FIQ_NP_SPLIT_DONE = (1<<3),
 	/* nonperiodic transaction failed to complete. IRQ has to decide whether to
 	 * issue a CLEAR_TT_BUFFER or retry
 	 */
-	FIQ_NP_SPLIT_ABORT,
+	FIQ_NP_SPLIT_LS_ABORTED,
+	FIQ_NP_SPLIT_HS_ABORTED,
 
 	/* Periodic state groups */
+	/* Periodic transactions are either started directly by the IRQ handler
+	 * or deferred if the TT is already in use.
+	 */
 	FIQ_PER_SSPLIT_QUEUED,
 	FIQ_PER_SSPLIT_STARTED,
 
-	FIQ_PER_CSPLIT_WAIT,
-	FIQ_PER_CSPLIT_POLL,
+	FIQ_PER_CSPLIT_WAIT, // SOF will subsequently queue the next packet
+	FIQ_PER_CSPLIT_NYET1, // Our first CSPLIT attempt resulted in a NYET.
+	FIQ_PER_CSPLIT_POLL, // For multiple CSPLITs (large isoc IN)
 
 	FIQ_PER_SPLIT_DONE,
-	FIQ_PER_SPLIT_ABORTED,
+	FIQ_PER_SPLIT_LS_ABORTED,
+	FIQ_PER_SPLIT_HS_ABORTED,
 
 	FIQ_TEST = (1<<16),
 #ifdef FIQ_DEBUG
@@ -206,6 +216,7 @@ struct fiq_channel_state {
 	hcint_data_t hcint_copy;
 	hcintmsk_data_t hcintmsk_copy;
 	hctsiz_data_t hctsiz_copy;
+	hcdma_data_t hcdma_copy;
 };
 
 /**

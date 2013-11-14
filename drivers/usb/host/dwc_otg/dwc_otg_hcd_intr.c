@@ -2267,7 +2267,7 @@ static int32_t handle_hc_chhltd_intr(dwc_otg_hcd_t * hcd,
  *
  * If a host channel interrupt was received by the IRQ and this was a channel
  * used by the FIQ, the execution flow for transfer completion is substantially
- * different from the normal (messy) path. This function its friends handles
+ * different from the normal (messy) path. This function and its friends handles
  * channel cleanup and transaction completion from a FIQ transaction.
  */
 int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)

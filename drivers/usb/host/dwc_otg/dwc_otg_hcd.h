@@ -620,6 +620,8 @@ extern void dwc_otg_hcd_queue_transactions(dwc_otg_hcd_t * hcd,
 int dwc_otg_hcd_allocate_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh);
 void dwc_otg_hcd_release_port(dwc_otg_hcd_t * dwc_otg_hcd, dwc_otg_qh_t *qh);
 
+extern int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh);
+extern int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh);
 
 /** @} */
 

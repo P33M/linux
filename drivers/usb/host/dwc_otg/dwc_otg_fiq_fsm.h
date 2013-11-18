@@ -116,7 +116,7 @@ enum fiq_debug_level {
 
 struct fiq_state;
 
-extern void _fiq_print (enum fiq_debug_level dbg_lvl, struct fiq_state *state, char *fmt, ...);
+extern void _fiq_print (enum fiq_debug_level dbg_lvl, volatile struct fiq_state *state, char *fmt, ...);
 #if 1
 #define fiq_print _fiq_print
 #else
@@ -144,15 +144,17 @@ enum fiq_fsm_state {
 
 	/* Nonperiodic state groups */
 	/* The SSPLIT has been sent from IRQ context. */
-	FIQ_NP_SSPLIT_STARTED = (1<<0),
+	FIQ_NP_SSPLIT_STARTED,
 	/* NAK response (or previous highspeed error) received for SSPLIT */
-	FIQ_NP_SSPLIT_RETRY = (1<<1),
-	/* A nonperiodic CSPLIT resulted in a NYET, hold off until next SOF */
-	FIQ_NP_CSPLIT_NYET_RETRY = (1<<2),
+	FIQ_NP_SSPLIT_RETRY,
+	/* Non-periodic CSPLIT processing is sufficiently
+	 * diverse to warrant a separate state group. */
+	FIQ_NP_OUT_CSPLIT_RETRY,
+	FIQ_NP_IN_CSPLIT_RETRY,
 	/* nonperiodic split transaction completed without error */
-	FIQ_NP_SPLIT_DONE = (1<<3),
+	FIQ_NP_SPLIT_DONE,
 	/* nonperiodic transaction failed to complete. IRQ has to decide whether to
-	 * issue a CLEAR_TT_BUFFER or retry
+	 * issue a CLEAR_TT_BUFFER or retry.
 	 */
 	FIQ_NP_SPLIT_LS_ABORTED,
 	FIQ_NP_SPLIT_HS_ABORTED,
@@ -172,7 +174,7 @@ enum fiq_fsm_state {
 	FIQ_PER_SPLIT_LS_ABORTED,
 	FIQ_PER_SPLIT_HS_ABORTED,
 
-	FIQ_TEST = (1<<16),
+	FIQ_TEST,
 #ifdef FIQ_DEBUG
 	FIQ_CHAN_DISABLED
 #endif
@@ -183,6 +185,35 @@ struct fiq_stack {
 	uint8_t stack[2048];
 	int magic2;
 };
+
+
+/**
+ * struct fiq_dma_info - DMA bounce buffer utilisation information (per-channel)
+ * @index:	Number of slots reported used for IN transactions / number of slots
+ *			transmitted for an OUT transaction
+ * @slot_len[6]: Number of actual transfer bytes in each slot
+ *
+ * Split transaction transfers can have variable length depending on other bus
+ * traffic. The OTG core DMA engine requires 4-byte aligned addresses therefore
+ * each transaction needs a guaranteed aligned address. A maximum of 6 split transfers
+ * can happen per-frame.
+ */
+struct fiq_dma_info {
+	u8 index;
+	u8 slot_len[6];
+};
+
+/* This overlay is the per-channel DMA slot for ease of access (avoids pointer mangling) */
+
+
+struct __attribute__((packed)) fiq_split_dma_slot {
+	u8 buf[188];
+};
+
+struct  __attribute__((packed)) fiq_dma_channel {
+	struct fiq_split_dma_slot index[6];
+};
+
 
 /**
  * struct fiq_channel_state - FIQ state machine storage
@@ -210,7 +241,9 @@ struct fiq_channel_state {
 	unsigned int port_addr;
 	/* in/out for communicating number of dma buffers used, or number of ISOC to do */
 	unsigned int nrpackets;
-	/* copies of registers - in/out communication from/to IRQ handler and for ease of channel setup */
+	struct fiq_dma_info dma_info;
+	/* copies of registers - in/out communication from/to IRQ handler and for ease of channel setup.
+		A bit of mungeing is performed - for example the hctsiz.b.maxp is _always_ the max packet size of the endpoint. */
 	hcchar_data_t hcchar_copy;
 	hcsplt_data_t hcsplt_copy;
 	hcint_data_t hcint_copy;
@@ -223,6 +256,7 @@ struct fiq_channel_state {
  * struct fiq_state - top-level FIQ state machine storage
  * @mphi_regs:		virtual address of the MPHI peripheral register file
  * @dwc_regs_base:	virtual address of the base of the DWC core register file
+ * @dma_base:		physical address for the base of the DMA bounce buffers
  * @dummy_send:		Scratch area for sending a fake message to the MPHI peripheral
  * @gintmsk_saved:	Top-level mask of interrupts that the FIQ has not handled.
  * 			Used for determining which interrupts fired to set off the IRQ handler.
@@ -240,11 +274,12 @@ struct fiq_channel_state {
  */
 struct fiq_state {
 	mphi_regs_t mphi_regs;
-	int mphi_int_count;
 	void *dwc_regs_base;
+	dma_addr_t dma_base;
 	void *dummy_send;
 	gintmsk_data_t gintmsk_saved;
 	haintmsk_data_t haintmsk_saved;
+	int mphi_int_count;
 	unsigned int np_count;
 	unsigned int np_sent;
 	unsigned int next_sched_frame;
@@ -255,41 +290,40 @@ struct fiq_state {
 	struct fiq_channel_state channel[0];
 };
 
-/**
- * struct fiq_dma_slot - a 188-byte DMA bounce buffer
- * @buf:	Does what it says on the tin. 188 bytes is the maximum per-microframe split transaction
- * 		data size.
- * @len:	For OUT transfers, this is to be programmed into the host channel
- * 		HCTSIZ register. For IN transfers, this is the actual amount of data received.
- */
-struct fiq_dma_slot {
-	u8 buf[188];
-	int len;
-};
 
 
-/**
- * struct fiq_perchannel_dma - coherent DMA bounce buffer for a single host channel
- * @slot[6]:	There can be up to 6 SSPLIT or CSPLIT transactions carrying data in/out
- * 		per full-speed frame. Data to be transmitted OUT is written here by the driver
- * 		for the FIQ to point the host channel's DMA to for each packet,
- * 		and data transmitted IN is written to each of the slots in turn by
- * 		the host channel's DMA.
- * @index:	For OUT, the number of slots that have been filled with data to transmit.
- * 		For IN, the number of slots that have received data.
- *
- * Each slot is 188 bytes of coherently allocated memory. The amount of data in each slot is variable,
- * see the fiq_dma_slot struct.
- */
-struct fiq_perchannel_dma {
-	/* we need at most 6 slots (max possible split-isoc OUT size) */
-	struct fiq_dma_slot slot[6];
-	/* for use mid-transaction, or to report that fewer than nrpackets were transferred */
-	int index;
-};
+// /**
+ // * struct fiq_dma_slot - a 188-byte DMA bounce buffer
+ // * @buf:	Does what it says on the tin. 188 bytes is the maximum per-microframe split transaction
+ // * 		data size.
+ // * @len:	For OUT transfers, this is to be programmed into the host channel
+ // * 		HCTSIZ register. For IN transfers, this is the actual amount of data received.
+ // */
+// struct fiq_dma_slot {
+	// u8 buf[188];
+	// int len;
+// };
 
+// /**
+ // * struct fiq_perchannel_dma - coherent DMA bounce buffer for a single host channel
+ // * @slot[6]:	There can be up to 6 SSPLIT or CSPLIT transactions carrying data in/out
+ // * 		per full-speed frame. Data to be transmitted OUT is written here by the driver
+ // * 		for the FIQ to point the host channel's DMA to for each packet,
+ // * 		and data transmitted IN is written to each of the slots in turn by
+ // * 		the host channel's DMA.
+ // * @index:	For OUT, the number of slots that have been filled with data to transmit.
+ // * 		For IN, the number of slots that have received data.
+ // *
+ // * Each slot is 188 bytes of coherently allocated memory. The amount of data in each slot is variable,
+ // * see the fiq_dma_slot struct.
+ // */
+// struct fiq_perchannel_dma {
+	// /* we need at most 6 slots (max possible split-isoc OUT size) */
+	// struct fiq_dma_slot slot[6];
+	// /* for use mid-transaction, or to report that fewer than nrpackets were transferred */
+	// int index;
+// };
 
-/* HCD will dma_alloc_coherent the required memory, all-up DMA size is 9kiB for 8 host channels */
 
 /* must be called FIQ disabled if not from FIQ context */
 //static inline int fiq_tt_in_use(int channel, int num_channels, struct fiq_channel_state *state)
@@ -317,10 +351,6 @@ struct fiq_perchannel_dma {
 //	return ret;
 //}
 //
-//static inline int fiq_transfer_ok(hcint_data_t hcint)
-//{
-//	return (hcint.d32 & ((1<<2) | (1<<7) | (1<<8) | (1<<9))) ? 0 : 1;
-//}
 //
 //static inline int fiq_full_frame_rollover(hfnum_data_t hfnum)
 //{

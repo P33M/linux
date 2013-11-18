@@ -470,20 +470,9 @@ int hcd_init(dwc_bus_dev_t *_dev)
 			DWC_ERROR("Can't claim FIQ");
 			goto error2;
 		}
-		dwc_otg_hcd->fiq_state->dummy_send = DWC_ALLOC_ATOMIC(16);
-		DWC_WARN("FIQ at 0x%08x", (fiq_fsm_enable ? dwc_otg_fiq_fsm : dwc_otg_fiq_nop));
-		DWC_WARN("FIQ ASM at 0x%08x length %d", &_dwc_otg_fiq_stub, (&_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub));
-		dwc_otg_hcd->fiq_state->gintmsk_saved.d32 = ~0;
-		dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint = ~0;
-		dwc_otg_hcd->fiq_stack->magic1 = 0xdeadbeef;
-		dwc_otg_hcd->fiq_stack->magic2 = 0xaa995566;
 
-		if (fiq_fsm_enable) {
-			int i;
-			for (i=0; i < dwc_otg_hcd->core_if->core_params->host_channels; i++) {
-				dwc_otg_hcd->fiq_state->channel[i].fsm = FIQ_PASSTHROUGH;
-			}
-		}
+		DWC_WARN("FIQ at 0x%08x", (fiq_fsm_enable ? (int)&dwc_otg_fiq_fsm : (int)&dwc_otg_fiq_nop));
+		DWC_WARN("FIQ ASM at 0x%08x length %d", (int)&_dwc_otg_fiq_stub, (int)(&_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub));
 
 		set_fiq_handler((void *) &_dwc_otg_fiq_stub, &_dwc_otg_fiq_stub_end - &_dwc_otg_fiq_stub);
 		memset(&regs,0,sizeof(regs));
@@ -509,7 +498,7 @@ int hcd_init(dwc_bus_dev_t *_dev)
 		dwc_otg_hcd->fiq_state->mphi_regs.outddb  = otg_dev->os_dep.mphi_base + 0x2c;
 		dwc_otg_hcd->fiq_state->mphi_regs.intstat = otg_dev->os_dep.mphi_base + 0x50;
 		dwc_otg_hcd->fiq_state->dwc_regs_base = otg_dev->os_dep.base;
-		DWC_WARN("MPHI regs_base at 0x%08x", dwc_otg_hcd->fiq_state->mphi_regs.base);
+		DWC_WARN("MPHI regs_base at 0x%08x", (int)dwc_otg_hcd->fiq_state->mphi_regs.base);
 		//Enable mphi peripheral
 		writel((1<<31),dwc_otg_hcd->fiq_state->mphi_regs.ctrl);
 //#ifdef DEBUG

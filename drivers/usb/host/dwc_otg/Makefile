@@ -12,7 +12,7 @@ ifeq ($(BUS_INTERFACE),)
         BUS_INTERFACE = -DPLATFORM_INTERFACE
 endif
 
-#EXTRA_CFLAGS	+= -DDEBUG
+EXTRA_CFLAGS	+= -DDEBUG
 #EXTRA_CFLAGS	+= -DDWC_OTG_DEBUGLEV=1 # reduce common debug msgs
 
 # Use one of the following flags to compile the software in host-only or

@@ -590,6 +590,10 @@ struct dwc_otg_hcd {
 
 	struct fiq_stack *fiq_stack;
 	struct fiq_state *fiq_state;
+	
+	/** Split transaction DMA bounce buffers */
+	struct fiq_dma_channel *fiq_dma;
+	
 #ifdef DEBUG
 	uint32_t frrem_samples;
 	uint64_t frrem_accum;

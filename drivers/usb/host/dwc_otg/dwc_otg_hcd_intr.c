@@ -120,13 +120,19 @@ int32_t dwc_otg_hcd_handle_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	if (dwc_otg_is_host_mode(core_if)) {
 		local_fiq_disable();
 		/* Pull in from the FIQ's disabled mask */
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQTOP  ");
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintsts.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintmsk.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", dwc_otg_hcd->fiq_state->gintmsk_saved.d32);
 		gintmsk.d32 = gintmsk.d32 | ~(dwc_otg_hcd->fiq_state->gintmsk_saved.d32);
 		dwc_otg_hcd->fiq_state->gintmsk_saved.d32 = ~0;
+		
 
 		if (fiq_fsm_enable && ( 0x0000FFFF & ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint))) {
 			/* We need to cock around with HAINT because the FIQ will not mask the top-level */
 //			fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQHCINT");
 //			fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint));
+			fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "HCINTSET");
 			gintsts.b.hcintr = 1;
 		}
 
@@ -210,13 +216,24 @@ int32_t dwc_otg_hcd_handle_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	}
 
 exit_handler_routine:
-
+	FLAME_OFF(23);
+	DWC_UDELAY(1);
+	FLAME_ON(23);
 	if (fiq_enable)	{
+		gintmsk_data_t gintmsk_new; 
+		haintmsk_data_t haintmsk_new;
 		local_fiq_disable();
+		gintmsk_new.d32 = *(volatile uint32_t *)&dwc_otg_hcd->fiq_state->gintmsk_saved.d32;
+		if(fiq_fsm_enable)
+			haintmsk_new.d32 = *(volatile uint32_t *)&dwc_otg_hcd->fiq_state->haintmsk_saved.d32;
+		else
+			haintmsk_new.d32 = 0x0000FFFF;
+			
 		/* The FIQ could have sneaked another interrupt in. If so, don't clear MPHI */
-		if (dwc_otg_hcd->fiq_state->gintmsk_saved.d32 == ~0) {
-		//	if(fiq_fsm_enable && ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint)) {
-				/* Clear the MPHI interrupt */
+		if ((gintmsk_new.d32 == ~0) && (haintmsk_new.d32 == 0x0000FFFF)) {
+				fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "MPHICLR ");
+				fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", *(volatile uint32_t *)&dwc_otg_hcd->fiq_state->gintmsk_saved.d32);
+				fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", *(volatile uint32_t *)&dwc_otg_hcd->fiq_state->haintmsk_saved.d32);
 				DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.intstat, (1<<16));
 				if (dwc_otg_hcd->fiq_state->mphi_int_count >= 50) {
 					DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl, ((1<<31) + (1<<16)));
@@ -226,12 +243,11 @@ exit_handler_routine:
 					dwc_otg_hcd->fiq_state->mphi_int_count = 0;
 				}
 				int_done++;
-		//	}
 		}
 		haintmsk.d32 = DWC_READ_REG32(&core_if->host_if->host_global_regs->haintmsk);
-//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQOUT  ");
-//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintmsk.d32);
-//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haintmsk.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQOUT  ");
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", gintmsk.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haintmsk.d32);
 		/* Re-enable interrupts that the FIQ masked (first time round) */
 		FIQ_WRITE(dwc_otg_hcd->fiq_state->dwc_regs_base + GINTMSK, gintmsk.d32);
 		local_fiq_enable();
@@ -640,11 +656,11 @@ int32_t dwc_otg_hcd_handle_hc_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 	{
 		/* check the mask? */
 		local_fiq_disable();
-//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQHAINT");
-//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haint.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "IRQHAINT");
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haint.d32);
 		haint.b2.chint |= ~(dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint);
 		dwc_otg_hcd->fiq_state->haintmsk_saved.b2.chint = ~0;
-//		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haint.d32);
+		fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "%08x", haint.d32);
 		local_fiq_enable();
 	}
 
@@ -658,7 +674,7 @@ int32_t dwc_otg_hcd_handle_hc_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 //			}
 		}
 	}
-
+	fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "HAINTOUT");
 	return retval;
 }
 
@@ -958,6 +974,12 @@ static void release_channel(dwc_otg_hcd_t * hcd,
 	{
 		/* hack for test */
 		hcd->fiq_state->channel[hc->hc_num].fsm = FIQ_PASSTHROUGH;
+		hcd->fiq_state->channel[hc->hc_num].hcchar_copy.d32 = 0;
+		hcd->fiq_state->channel[hc->hc_num].hcsplt_copy.d32 = 0;
+		hcd->fiq_state->channel[hc->hc_num].hcint_copy.d32 = 0;
+		hcd->fiq_state->channel[hc->hc_num].hcintmsk_copy.d32 = 0;
+		hcd->fiq_state->channel[hc->hc_num].hctsiz_copy.d32 = 0;
+		hcd->fiq_state->channel[hc->hc_num].hcdma_copy.d32 = 0;
 		hcd->fiq_state->channel[hc->hc_num].nr_errors = 0;
 	}
 
@@ -2273,10 +2295,36 @@ static int32_t handle_hc_chhltd_intr(dwc_otg_hcd_t * hcd,
 int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 {
 	struct fiq_channel_state *st = &hcd->fiq_state->channel[num];
+	dwc_hc_t *hc = hcd->hc_ptr_array[num];
+	dwc_otg_qtd_t *qtd = DWC_CIRCLEQ_FIRST(&hc->qh->qtd_list);
+	dwc_otg_qh_t *qh = hc->qh;
+	dwc_otg_hc_regs_t *hc_regs = hcd->core_if->host_if->hc_regs[num];
+	
 	int ret = 0;
-	if (st->fsm == FIQ_TEST) {
-		/* ha, it worked */
-		DWC_WARN("FIQ test on %d: success? %d", num, st->nr_errors);
+	
+	switch (st->fsm) {
+	case FIQ_TEST:
+		break;
+		
+	case FIQ_NP_SPLIT_DONE:
+		/* Nonperiodic transaction complete. */
+		if (!qh->ep_is_in) {
+			qtd->ssplit_out_xfer_count = hc->xfer_len;
+		}
+		fiq_print(FIQDBG_INT, hcd->fiq_state, "IRQNPSPL");
+		handle_hc_xfercomp_intr(hcd, hc, hc_regs, qtd);
+		ret = 1;
+		break;
+	
+	case FIQ_NP_SPLIT_HS_ABORTED:
+		break;
+	
+	case FIQ_NP_SPLIT_LS_ABORTED:
+		break;
+		
+	default:
+		fiq_print(FIQDBG_INT, hcd->fiq_state, "DED %01d %01d ", num , st->fsm);
+		BUG();	
 	}
 	return ret;
 }
@@ -2298,8 +2346,14 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 	 * Execution path is fundamentally different for the channels after a FIQ has completed
 	 * a split transaction.
 	 */
-	if (fiq_fsm_enable && (dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH)) {
-		dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd, num);
+	 
+//	DWC_WARN("hc=%d, fsm=%d, pass=%d", num, dwc_otg_hcd->fiq_state->channel[num].fsm, FIQ_PASSTHROUGH);
+	if (fiq_fsm_enable) {
+		if (dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH) {
+			dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd, num);
+//			DWC_WARN("fsm handler");
+			return 1;
+		}
 	}
 
 	hc = dwc_otg_hcd->hc_ptr_array[num];
@@ -2308,6 +2362,7 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 		/* We are responding to a channel disable. Driver
 		 * state is cleared - our qtd has gone away.
 		 */
+		DWC_WARN("DEQUEUE");
 		release_channel(dwc_otg_hcd, hc, NULL, hc->halt_status);
 		return 1;
 	}
@@ -2315,9 +2370,8 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 
 	hcint.d32 = DWC_READ_REG32(&hc_regs->hcint);
 	hcintmsk.d32 = DWC_READ_REG32(&hc_regs->hcintmsk);
-	DWC_DEBUGPL(DBG_HCDV,
-		    "  hcint 0x%08x, hcintmsk 0x%08x, hcint&hcintmsk 0x%08x\n",
-		    hcint.d32, hcintmsk.d32, (hcint.d32 & hcintmsk.d32));
+	//DWC_WARN("hc=%d  hcint 0x%08x, hcintmsk 0x%08x, hcint&hcintmsk 0x%08x\n",
+	//	    num, hcint.d32, hcintmsk.d32, (hcint.d32 & hcintmsk.d32));
 	hcint.d32 = hcint.d32 & hcintmsk.d32;
 
 	if (!dwc_otg_hcd->core_if->dma_enable) {

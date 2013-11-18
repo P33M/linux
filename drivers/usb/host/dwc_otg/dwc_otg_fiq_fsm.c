@@ -44,7 +44,8 @@
  * - A method of forcing a software generated interrupt from FIQ mode that then
  *   triggers an IRQ entry (with the dwc USB handler called by this IRQ number)
  * - Guaranteed interrupt routing such that both the FIQ and SGI occur on the same
- *   processor core - there is no locking between the FIQ and IRQ.
+ *   processor core - there is no locking between the FIQ and IRQ (aside from
+ *   local_fiq_disable)
  *
  */
 
@@ -53,7 +54,7 @@
 
 char buffer[1000*16];
 int wptr;
-void _fiq_print(enum fiq_debug_level dbg_lvl, struct fiq_state *state, char *fmt, ...)
+void _fiq_print(enum fiq_debug_level dbg_lvl, volatile struct fiq_state *state, char *fmt, ...)
 {
         enum fiq_debug_level dbg_lvl_req = FIQDBG_INT;
         va_list args;
@@ -79,6 +80,48 @@ void _fiq_print(enum fiq_debug_level dbg_lvl, struct fiq_state *state, char *fmt
 
 static int nrfiq = 0;
 
+/**
+ * fiq_fsm_restart_channel() - Poke channel enable bit for a non-periodic transaction
+ * @channel: channel to re-enable
+ */
+static inline void fiq_fsm_restart_channel(struct fiq_state *st, int n)
+{
+	hcchar_data_t hcchar = { .d32 = FIQ_READ(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCCHAR) };
+	hcchar.b.chen = 1;
+	FIQ_WRITE(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCCHAR, hcchar.d32);
+	fiq_print(FIQDBG_INT, st, "F HCGO %01d", n);
+	fiq_print(FIQDBG_INT, st, "%08x", hcchar.d32);
+}
+
+/**
+ * fiq_fsm_setup_np_csplit() - Prepare a host channel for a np csplit transaction stage
+ * @st: Pointer to the channel's state
+ * @n : channel number
+ *
+ * Change host channel registers to perform a complete-split transaction. Being mindful of the
+ * endpoint direction, set control regs up correctly.
+ */
+static inline void notrace fiq_fsm_setup_np_csplit(struct fiq_state *st, int n)
+{
+	hcsplt_data_t hcsplt = { .d32 = FIQ_READ(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCSPLT) };
+	hctsiz_data_t hctsiz = { .d32 = FIQ_READ(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCTSIZ) };
+	
+	hcsplt.b.compsplt = 1;
+	if (st->channel[n].hcchar_copy.b.epdir == 1) {
+		// If IN, the CSPLIT result contains the data or a hub handshake. hctsiz = maxpacket.
+		hctsiz.b.xfersize = st->channel[n].hctsiz_copy.b.xfersize;
+	} else {
+		// If OUT, the CSPLIT result contains handshake only.
+		hctsiz.b.xfersize = 0;
+	}	
+	FIQ_WRITE(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCSPLT, hcsplt.d32);
+	FIQ_WRITE(st->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCTSIZ, hctsiz.d32);
+	fiq_print(FIQDBG_INT, st, "FIQ CS %01d", n);
+	fiq_print(FIQDBG_INT, st, "%08x", hcsplt.d32);
+	fiq_print(FIQDBG_INT, st, "%08x", hctsiz.d32);
+	mb();
+}
+
 
 /**
  * fiq_fsm_do_sof() - FSM start-of-frame interrupt handler
@@ -99,14 +142,27 @@ static int nrfiq = 0;
  * the timing granularity required to achieve optimal throughout. The workaround is to use
  * the SOF "timer" (125uS) to perform this task.
  */
-static inline int fiq_fsm_do_sof(struct fiq_state *state, int num_channels)
+static inline int notrace fiq_fsm_do_sof(struct fiq_state *state, int num_channels)
 {
-	hfnum_data_t hfnum;
-	hfnum.d32 = FIQ_READ(state->dwc_regs_base + HFNUM);
+	hfnum_data_t hfnum = { .d32 = FIQ_READ(state->dwc_regs_base + HFNUM) };
+	int n; 
 	/* Stub for now. Handle only SOF - FSM advancement comes later */
 //	fiq_print(FIQDBG_INT, state, "FIQSOF  ");
 //	fiq_print(FIQDBG_INT, state, "%03u%03u", state->np_count, state->np_sent);
 //	fiq_print(FIQDBG_INT, state, " %05u:%01u", state->next_sched_frame/8 , state->next_sched_frame % 8 );
+	for (n = 0; n < num_channels; n++) {
+		switch (state->channel[n].fsm) {
+		case FIQ_NP_SSPLIT_RETRY:
+		case FIQ_NP_IN_CSPLIT_RETRY:
+		case FIQ_NP_OUT_CSPLIT_RETRY:
+			// Kick the HC
+			fiq_fsm_restart_channel(state, n);
+			break;
+		default:
+			break;
+		}
+	}
+
 	if (state->np_count == state->np_sent &&
 			dwc_frame_num_gt(state->next_sched_frame, hfnum.b.frnum)) {
 		return 1;
@@ -116,21 +172,192 @@ static inline int fiq_fsm_do_sof(struct fiq_state *state, int num_channels)
 }
 
 
-static inline int fiq_fsm_do_hcintr(struct fiq_state *state, int num_channels, int n /*, struct fiq_perchannel_dma *dma */)
+/**
+ * fiq_fsm_do_hcintr() - FSM host channel interrupt handler
+ * @state: Pointer to the FIQ state struct
+ * @num_channels: Number of channels as per hardware config
+ * @n: channel for which HAINT(i) was raised
+ * 
+ * An important property is that only the CHHLT interrupt is unmasked. Unfortunately, AHBerr is as well.
+ */
+static inline int notrace fiq_fsm_do_hcintr(struct fiq_state *state, int num_channels, int n)
 {
-	if (state->channel[n].fsm == FIQ_PASSTHROUGH) {
-		/* Doesn't belong to us: kick it upstairs */
-		return 0;
+	hcint_data_t hcint;
+	hcintmsk_data_t hcintmsk;
+	int handled = 0;
+	int restart = 0;
+	struct fiq_channel_state *st = &state->channel[n];
+
+	hcint.d32 = FIQ_READ(state->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCINT);
+	hcintmsk.d32 = FIQ_READ(state->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCINTMSK);
+	
+	if (st->fsm != FIQ_PASSTHROUGH) {
+		fiq_print(FIQDBG_INT, state, "HCFIQ %01d", n);
+		fiq_print(FIQDBG_INT, state, "ST:%02d   ", st->fsm);
+		fiq_print(FIQDBG_INT, state, "%08x", hcint.d32);
+		fiq_print(FIQDBG_INT, state, "%08x", hcintmsk.d32);
+		nrfiq++;
+		if (nrfiq > 10) {
+			int *derp = NULL;
+			*derp = 1;
+		}
 	}
-	switch (state->channel[n].fsm) {
+	
+	switch (st->fsm) {
+	
+	case FIQ_PASSTHROUGH:
+		/* doesn't belong to us, kick it upstairs */
+		break;
+
+#ifdef FIQ_DEBUG
 	case FIQ_TEST:
 		fiq_print(FIQDBG_INT, state, "HCTEST %d", n);
-		state->channel[n].nr_errors = 1;
-		return 0;
+		st->nr_errors = 1;
+		break;
+#endif
+	/* Non-periodic state groups */
+	case FIQ_NP_SSPLIT_STARTED:
+	case FIQ_NP_SSPLIT_RETRY: // SOF kicked the channel due to a prior NAK response, or retry a previous HS error.
+		/* Got a HCINT for a NP SSPLIT. Expected ACK / NAK / fail */
+		if (hcint.b.ack) {
+			/* SSPLIT complete. For OUT, the data has been sent. For IN, the LS transaction
+			 * will start shortly. SOF needs to kick the transaction to prevent a NYET flood. */
+			if(st->hcchar_copy.b.epdir == 1)
+				st->fsm = FIQ_NP_IN_CSPLIT_RETRY;
+			else
+				st->fsm = FIQ_NP_OUT_CSPLIT_RETRY;
+			st->nr_errors = 0;
+			handled = 1;
+			fiq_fsm_setup_np_csplit(state, n);
+			break;
+		} else if (hcint.b.nak) {
+			// No buffer space in TT. Retry on a uframe boundary.
+			st->fsm = FIQ_NP_SSPLIT_RETRY;
+			handled = 1;
+			break;
+		} else if (hcint.b.xacterr) {
+			// The only other one we care about is xacterr. This implies HS bus error - retry.
+			st->nr_errors++;
+			st->fsm = FIQ_NP_SSPLIT_RETRY;
+			if (st->nr_errors >= 3) {
+				st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
+				handled = 0;
+				restart = 0;
+			} else {
+				handled = 1;
+				restart = 1;
+			}
+			break;
+		} else {
+			st->fsm = FIQ_NP_SPLIT_LS_ABORTED;
+			handled = 0;
+			restart = 0;
+			break;
+		}
+		break;
+		
+	case FIQ_NP_IN_CSPLIT_RETRY:
+		/* Received a CSPLIT done interrupt.
+		 * Expected Data/NAK/STALL/NYET for IN. */
+		if (hcint.b.xfercomp) {
+			/* For IN, data is present. */
+			st->fsm = FIQ_NP_SPLIT_DONE;
+		} else if (hcint.b.nak) {
+			/* no endpoint data. Punt it upstairs */
+			st->fsm = FIQ_NP_SPLIT_DONE;
+		} else if (hcint.b.nyet) {
+			/* CSPLIT NYET - retry on a uframe boundary. */
+			handled = 1;
+			restart = 0;
+			st->nr_errors = 0;
+		} else if (hcint.b.datatglerr) {
+			/* data toggle errors do not set the xfercomp bit. */
+			st->fsm = FIQ_NP_SPLIT_LS_ABORTED;
+		} else if (hcint.b.xacterr) {
+			/* HS error. Retry immediate */
+			st->fsm = FIQ_NP_IN_CSPLIT_RETRY;
+			st->nr_errors++;
+			if (st->nr_errors >= 3) {
+				st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
+				handled = 0;
+				restart = 0;
+			} else {
+				handled = 1;
+				restart = 1;
+			}
+		} else if (hcint.b.stall) {
+			/* A STALL implies either a LS bus error or a genuine STALL. */
+			st->fsm = FIQ_NP_SPLIT_LS_ABORTED;
+		} else {
+			// Something unexpected happened. AHBerror or babble perhaps. Let the IRQ deal with it.
+			st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
+		}
+		break;
+	
+	case FIQ_NP_OUT_CSPLIT_RETRY:
+		/* Received a CSPLIT done interrupt.
+		 * Expected ACK/NAK/STALL/NYET for OUT. Xfercomp? */
+		if (hcint.b.xfercomp) {
+			//FIXME: the response is an ACK handshake - what actually happens?
+			st->fsm = FIQ_NP_SPLIT_DONE;
+		} else if (hcint.b.nak) {
+			// The HCD will implement the holdoff on frame boundaries.
+			st->fsm = FIQ_NP_SPLIT_DONE;
+		} else if (hcint.b.nyet) {
+			// Hub still processing.
+			st->fsm = FIQ_NP_OUT_CSPLIT_RETRY;
+			handled = 1;
+			/* If we are talking to a FS device, we can retry immediate without
+			 * too much interrupt spam - at most 5 FIQ retriggers will happen.
+			 * LS must wait on a uFrame boundary.
+			 */
+			restart = 0;
+		} else if (hcint.b.xacterr) { 
+			/* HS error. retry immediate */
+			st->fsm = FIQ_NP_OUT_CSPLIT_RETRY;
+			st->nr_errors++;
+			if (st->nr_errors >= 3) {
+				st->fsm = FIQ_NP_SPLIT_HS_ABORTED;
+			} else {
+				handled = 1;
+				restart = 1;
+			}
+		} else if (hcint.b.stall) { 
+			/* LS bus error or genuine stall */
+			st->fsm = FIQ_NP_SPLIT_LS_ABORTED;
+		}
+		break;
+	
+	/* Periodic split states */
+	case FIQ_PER_SSPLIT_STARTED:
+	case FIQ_PER_CSPLIT_NYET1:
+	case FIQ_PER_CSPLIT_POLL:
+	
 	default:
 		break;
 	}
-	return 0;
+		
+	/* We always clear our respective channel interrupts before restarting the channel. */
+
+	// if (!handled) {
+		// /* if we are punting this to the IRQ, save the interrupts and mask. */
+		// st->hcint_copy.d32 = hcint.d32;
+		// st->hcintmsk_copy.d32 = hcintmsk.d32;
+		// hcintmsk.d32 = 0;
+		// FIQ_WRITE(state->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCINTMSK, hcintmsk.d32);
+	// }
+	if (handled) {
+		FIQ_WRITE(state->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCINT, hcint.d32);
+	}
+
+	if (restart) {
+		/* Restart always implies handled. */
+		fiq_print(FIQDBG_INT, state, "FRESTART");
+		fiq_fsm_restart_channel(state, n);
+	}
+	if (st->fsm != FIQ_PASSTHROUGH)
+		fiq_print(FIQDBG_INT, state, "FSMOUT %01d", st->fsm);
+	return handled;
 }
 
 
@@ -150,11 +377,11 @@ static inline int fiq_fsm_do_hcintr(struct fiq_state *state, int num_channels, i
  *
  * Return: void
  */
-void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_perchannel_dma *dma */)
+void notrace dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels)
 {
 	gintsts_data_t gintsts, gintsts_handled;
 	gintmsk_data_t gintmsk;
-	hfnum_data_t hfnum;
+	//hfnum_data_t hfnum;
 	haint_data_t haint, haint_handled;
 	haintmsk_data_t haintmsk;
 	int kick_irq = 0;
@@ -198,24 +425,30 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 					 */
 					fiq_print(FIQDBG_INT, state, "NO      ");
 					state->haintmsk_saved.b2.chint &= ~(1 << i);
-					haint_handled.b2.chint |= (1 << i);
 				} else {
-					/* do_hcintr cleaned up after itself */
-					//haint_handled.b2.chint |= (1 << i);
+					/* do_hcintr cleaned up after itself, but clear haint */
+					fiq_print(FIQDBG_INT, state, "YES     ");
+					haint_handled.b2.chint |= (1 << i);
 				}
 			}
 		}
+		
+		if (haint_handled.b2.chint) {
+			FIQ_WRITE(state->dwc_regs_base + HAINT, haint_handled.d32);
+		}
 
-		if (haintmsk.d32 != state->haintmsk_saved.d32) {
+		if (haintmsk.d32 != (haintmsk.d32 & state->haintmsk_saved.d32)) {
 			/*
 			 * This is necessary to avoid multiple retriggers of the MPHI in the case
 			 * where interrupts are held off and HCINTs start to pile up.
 			 * Only wake up the IRQ if a new interrupt came in, was not handled and was
 			 * masked.
 			 */
+			// fiq_print(FIQDBG_INT, state, "KICK HA ");
+			// fiq_print(FIQDBG_INT, state, "%08x", haintmsk.d32);
+			// fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
 			haintmsk.d32 &= state->haintmsk_saved.d32;
 			FIQ_WRITE(state->dwc_regs_base + HAINTMSK, haintmsk.d32);
-			FIQ_WRITE(state->dwc_regs_base + HAINT, haint.d32);
 			kick_irq |= 1;
 		}
 		/* Top-Level interrupt - always handled because it's level-sensitive */
@@ -230,6 +463,9 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 	if (gintmsk.d32 != (gintmsk.d32 & state->gintmsk_saved.d32)) {
 		gintmsk.d32 &= state->gintmsk_saved.d32;
 		FIQ_WRITE(state->dwc_regs_base + GINTMSK, gintmsk.d32);
+		fiq_print(FIQDBG_INT, state, "KICKGINT");
+		fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
+		fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
 		kick_irq |= 1;
 	}
 
@@ -241,16 +477,20 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
 	/* We got an interrupt, didn't handle it. */
 	if (kick_irq) {
 		state->mphi_int_count++;
-//		fiq_print(FIQDBG_INT, state, "FIQ->IRQ");
-//		fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
-//		fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
-//		fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
+		 fiq_print(FIQDBG_INT, state, "FIQ->IRQ");
+		 fiq_print(FIQDBG_INT, state, "%08x", gintmsk.d32);
+		 fiq_print(FIQDBG_INT, state, "%08x", state->gintmsk_saved.d32);
+		 fiq_print(FIQDBG_INT, state, "%08x", state->haintmsk_saved.d32);
 		FIQ_WRITE(state->mphi_regs.outdda, (int) state->dummy_send);
 		FIQ_WRITE(state->mphi_regs.outddb, (1<<29));
 
 	}
-	nrfiq++;
+
 	FLAME_OFF(24);
+//	if (nrfiq > 100) {
+//		int *derp = NULL;
+//		*derp = 1;
+//	}
 	mb();
 }
 
@@ -267,7 +507,7 @@ void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels /*, struct fiq_pe
  *
  * Return: void
  */
-void dwc_otg_fiq_nop(struct fiq_state *state)
+void notrace dwc_otg_fiq_nop(struct fiq_state *state)
 {
 	gintsts_data_t gintsts, gintsts_handled;
 	gintmsk_data_t gintmsk;
@@ -317,6 +557,8 @@ void dwc_otg_fiq_nop(struct fiq_state *state)
 		FIQ_WRITE(state->dwc_regs_base + GINTMSK, gintmsk.d32);
 
 		/* An unmasked, unhandled interrupt has occurred, kick IRQ */
+		/* Force a clear before another dummy send */
+		FIQ_WRITE(state->mphi_regs.intstat, (1<<29));
 		FIQ_WRITE(state->mphi_regs.outdda, (int) state->dummy_send);
 		FIQ_WRITE(state->mphi_regs.outddb, (1<<29));
 

@@ -268,7 +268,7 @@ static inline int notrace fiq_fsm_do_hcintr(struct fiq_state *state, int num_cha
 		} else if (hcint.b.nyet) {
 			/* CSPLIT NYET - retry on a uframe boundary. */
 			handled = 1;
-			restart = 0;
+			restart = 1;
 			st->nr_errors = 0;
 		} else if (hcint.b.datatglerr) {
 			/* data toggle errors do not set the xfercomp bit. */
@@ -311,7 +311,7 @@ static inline int notrace fiq_fsm_do_hcintr(struct fiq_state *state, int num_cha
 			 * too much interrupt spam - at most 5 FIQ retriggers will happen.
 			 * LS must wait on a uFrame boundary.
 			 */
-			restart = 0;
+			restart = 1;
 		} else if (hcint.b.xacterr) { 
 			/* HS error. retry immediate */
 			st->fsm = FIQ_NP_OUT_CSPLIT_RETRY;

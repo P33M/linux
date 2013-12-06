@@ -1162,6 +1162,8 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 
 	/* Remove the host channel from the free list. */
 	DWC_CIRCLEQ_REMOVE_INIT(&hcd->free_hc_list, hc, hc_list_entry);
+	
+	DWC_WARN("Picked HC %d", hc->hc_num);
 
 	qh->channel = hc;
 

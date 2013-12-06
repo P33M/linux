@@ -1036,6 +1036,7 @@ cleanup:
 	 * there's no need to clear the Channel Halted interrupt separately.
 	 */
 	dwc_otg_hc_cleanup(hcd->core_if, hc);
+	DWC_WARN("Reinsert HC %d", hc->hc_num);
 	DWC_CIRCLEQ_INSERT_TAIL(&hcd->free_hc_list, hc, hc_list_entry);
 
 	if (!microframe_schedule) {
@@ -2301,6 +2302,7 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 	dwc_otg_hc_regs_t *hc_regs = hcd->core_if->host_if->hc_regs[num];
 	
 	int ret = 0;
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "DED %01d %01d ", num , st->fsm);
 	
 	switch (st->fsm) {
 	case FIQ_TEST:
@@ -2323,7 +2325,6 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 		break;
 		
 	default:
-		fiq_print(FIQDBG_INT, hcd->fiq_state, "DED %01d %01d ", num , st->fsm);
 		BUG();	
 	}
 	return ret;
@@ -2347,11 +2348,11 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 	 * a split transaction.
 	 */
 	 
-//	DWC_WARN("hc=%d, fsm=%d, pass=%d", num, dwc_otg_hcd->fiq_state->channel[num].fsm, FIQ_PASSTHROUGH);
+	DWC_WARN("hc=%d, fsm=%d, pass=%d", num, dwc_otg_hcd->fiq_state->channel[num].fsm, FIQ_PASSTHROUGH);
 	if (fiq_fsm_enable) {
-		if (dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH) {
+		if (*(volatile uint32_t *)&dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH) {
 			dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd, num);
-//			DWC_WARN("fsm handler");
+			DWC_WARN("fsm handler");
 			return 1;
 		}
 	}

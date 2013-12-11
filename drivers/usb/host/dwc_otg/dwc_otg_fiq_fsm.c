@@ -196,11 +196,11 @@ static inline int notrace fiq_fsm_do_hcintr(struct fiq_state *state, int num_cha
 		fiq_print(FIQDBG_INT, state, "ST:%02d   ", st->fsm);
 		fiq_print(FIQDBG_INT, state, "%08x", hcint.d32);
 		fiq_print(FIQDBG_INT, state, "%08x", hcintmsk.d32);
-		nrfiq++;
-		if (nrfiq > 10) {
-			int *derp = NULL;
-			*derp = 1;
-		}
+		// nrfiq++;
+		// if (nrfiq > 10) {
+			// int *derp = NULL;
+			// *derp = 1;
+		// }
 	}
 	
 	switch (st->fsm) {
@@ -348,6 +348,9 @@ static inline int notrace fiq_fsm_do_hcintr(struct fiq_state *state, int num_cha
 	// }
 	if (handled) {
 		FIQ_WRITE(state->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCINT, hcint.d32);
+	} else {
+		/* Copy the regs into the state so the IRQ knows what to do */
+		st->hcint_copy.d32 = hcint.d32;
 	}
 
 	if (restart) {

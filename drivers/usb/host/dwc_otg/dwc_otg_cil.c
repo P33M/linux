@@ -2875,12 +2875,12 @@ void dwc_otg_hc_start_transfer(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 	hcchar.b.chen = 1;
 	hcchar.b.chdis = 0;
 	DWC_WRITE_REG32(&hc_regs->hcchar, hcchar.d32);
-	if (hc->do_split) {
-		DWC_PRINTF("dwc start_transfer: split regs \n");
-		DWC_PRINTF("hcchar=0x%08x hcsplt=0x%08x hctsiz=0x%08x\n hcdma=0x%08x qh=0x%08x\n",
-				hcchar.d32, hcsplt.d32, hctsiz.d32,
-				dma_addr, hc->qh);
-	}
+	// if (hc->do_split) {
+		// DWC_PRINTF("dwc start_transfer: split regs \n");
+		// DWC_PRINTF("hcchar=0x%08x hcsplt=0x%08x hctsiz=0x%08x\n hcdma=0x%08x qh=0x%08x\n",
+				// hcchar.d32, hcsplt.d32, hctsiz.d32,
+				// dma_addr, hc->qh);
+	// }
 	hc->xfer_started = 1;
 	hc->requests++;
 

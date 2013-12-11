@@ -648,8 +648,8 @@ int32_t dwc_otg_hcd_handle_hc_intr(dwc_otg_hcd_t * dwc_otg_hcd)
 
 	/* Clear appropriate bits in HCINTn to clear the interrupt bit in
 	 * GINTSTS */
-
-	haint.d32 = dwc_otg_read_host_all_channels_intr(dwc_otg_hcd->core_if);
+	if (!fiq_fsm_enable)
+		haint.d32 = dwc_otg_read_host_all_channels_intr(dwc_otg_hcd->core_if);
 
 	// Overwrite with saved interrupts from fiq handler
 	if(fiq_fsm_enable)
@@ -1036,7 +1036,7 @@ cleanup:
 	 * there's no need to clear the Channel Halted interrupt separately.
 	 */
 	dwc_otg_hc_cleanup(hcd->core_if, hc);
-	DWC_WARN("Reinsert HC %d", hc->hc_num);
+//	DWC_WARN("Reinsert HC %d", hc->hc_num);
 	DWC_CIRCLEQ_INSERT_TAIL(&hcd->free_hc_list, hc, hc_list_entry);
 
 	if (!microframe_schedule) {
@@ -2282,6 +2282,8 @@ static int32_t handle_hc_chhltd_intr(dwc_otg_hcd_t * hcd,
 	return 1;
 }
 
+extern void dump_channel_info(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh);
+
 /**
  * dwc_otg_hcd_handle_hc_fsm() - handle an unmasked channel interrupt
  * 				 from a channel handled in the FIQ
@@ -2300,9 +2302,11 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 	dwc_otg_qtd_t *qtd = DWC_CIRCLEQ_FIRST(&hc->qh->qtd_list);
 	dwc_otg_qh_t *qh = hc->qh;
 	dwc_otg_hc_regs_t *hc_regs = hcd->core_if->host_if->hc_regs[num];
+	hcint_data_t hcint = hcd->fiq_state->channel[num].hcint_copy;
 	
 	int ret = 0;
 	fiq_print(FIQDBG_INT, hcd->fiq_state, "DED %01d %01d ", num , st->fsm);
+	
 	
 	switch (st->fsm) {
 	case FIQ_TEST:
@@ -2314,17 +2318,45 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 			qtd->ssplit_out_xfer_count = hc->xfer_len;
 		}
 		fiq_print(FIQDBG_INT, hcd->fiq_state, "IRQNPSPL");
-		handle_hc_xfercomp_intr(hcd, hc, hc_regs, qtd);
+		if (hcint.b.xfercomp) {
+			handle_hc_xfercomp_intr(hcd, hc, hc_regs, qtd);
+		} else if (hcint.b.nak) {
+			handle_hc_nak_intr(hcd, hc, hc_regs, qtd);
+		}
 		ret = 1;
 		break;
 	
 	case FIQ_NP_SPLIT_HS_ABORTED:
+		/* A HS abort is a 3-strikes on the HS bus at any point in the transaction.
+		 * Assume that the data did not make it (nonperiodic ensure reliable traffic) */
+		if (hcint.b.xacterr) {
+			qtd->error_count += st->nr_errors;
+			handle_hc_xacterr_intr(hcd, hc, hc_regs, qtd);
+		} else if (hcint.b.ahberr) {
+			handle_hc_ahberr_intr(hcd, hc, hc_regs, qtd);
+		} else {
+			dump_channel_info(hcd, qh);
+			BUG();
+		}
 		break;
 	
 	case FIQ_NP_SPLIT_LS_ABORTED:
+		/* A few cases can cause this - either an unknown state on a SSPLIT or 
+		 * STALL/data toggle error response on a CSPLIT */
+		if (hcint.b.stall) {
+			handle_hc_stall_intr(hcd, hc, hc_regs, qtd);
+		} else if (hcint.b.datatglerr) {
+			handle_hc_datatglerr_intr(hcd, hc, hc_regs, qtd);
+		} else if (hcint.b.ahberr) {
+			handle_hc_ahberr_intr(hcd, hc, hc_regs, qtd);
+		} else {
+			dump_channel_info(hcd, qh);
+			BUG();
+		}
 		break;
 		
 	default:
+		dump_channel_info(hcd, qh);
 		BUG();	
 	}
 	return ret;
@@ -2342,20 +2374,7 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 
 	DWC_DEBUGPL(DBG_HCDV, "--Host Channel Interrupt--, Channel %d\n", num);
 
-	/*
-	 * FSM mode: Check to see if this is a HC interrupt from a channel handled by the FIQ.
-	 * Execution path is fundamentally different for the channels after a FIQ has completed
-	 * a split transaction.
-	 */
-	 
-	DWC_WARN("hc=%d, fsm=%d, pass=%d", num, dwc_otg_hcd->fiq_state->channel[num].fsm, FIQ_PASSTHROUGH);
-	if (fiq_fsm_enable) {
-		if (*(volatile uint32_t *)&dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH) {
-			dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd, num);
-			DWC_WARN("fsm handler");
-			return 1;
-		}
-	}
+
 
 	hc = dwc_otg_hcd->hc_ptr_array[num];
 	hc_regs = dwc_otg_hcd->core_if->host_if->hc_regs[num];
@@ -2367,13 +2386,31 @@ int32_t dwc_otg_hcd_handle_hc_n_intr(dwc_otg_hcd_t * dwc_otg_hcd, uint32_t num)
 		release_channel(dwc_otg_hcd, hc, NULL, hc->halt_status);
 		return 1;
 	}
+
+	/*
+	 * FSM mode: Check to see if this is a HC interrupt from a channel handled by the FIQ.
+	 * Execution path is fundamentally different for the channels after a FIQ has completed
+	 * a split transaction.
+	 */
+	 
+//	DWC_WARN("hc=%d, fsm=%d, pass=%d", num, dwc_otg_hcd->fiq_state->channel[num].fsm, FIQ_PASSTHROUGH);
+	if (fiq_fsm_enable) {
+		if (*(volatile uint32_t *)&dwc_otg_hcd->fiq_state->channel[num].fsm != FIQ_PASSTHROUGH) {
+			dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd, num);
+//			DWC_WARN("fsm handler");
+			return 1;
+		}
+	}
 	qtd = DWC_CIRCLEQ_FIRST(&hc->qh->qtd_list);
 
 	hcint.d32 = DWC_READ_REG32(&hc_regs->hcint);
 	hcintmsk.d32 = DWC_READ_REG32(&hc_regs->hcintmsk);
-	//DWC_WARN("hc=%d  hcint 0x%08x, hcintmsk 0x%08x, hcint&hcintmsk 0x%08x\n",
-	//	    num, hcint.d32, hcintmsk.d32, (hcint.d32 & hcintmsk.d32));
+	if (hc->qh->do_split) {
+			DWC_WARN("hc=%d  hcint 0x%08x, hcintmsk 0x%08x, hcint&hcintmsk 0x%08x",
+		    num, hcint.d32, hcintmsk.d32, (hcint.d32 & hcintmsk.d32));
+	}
 	hcint.d32 = hcint.d32 & hcintmsk.d32;
+	
 
 	if (!dwc_otg_hcd->core_if->dma_enable) {
 		if (hcint.b.chhltd && hcint.d32 != 0x2) {

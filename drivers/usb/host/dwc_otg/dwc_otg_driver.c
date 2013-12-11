@@ -247,6 +247,7 @@ bool fiq_fsm_enable = false;
 //Global variable to switch the nak holdoff on or off
 bool nak_holdoff_enable = true;
 
+unsigned short fiq_fsm_mask=0x00FF;
 
 /**
  * This function shows the Driver Version.
@@ -1382,7 +1383,15 @@ MODULE_PARM_DESC(fiq_enable, "Enable the FIQ");
 module_param(nak_holdoff_enable, bool, 0444);
 MODULE_PARM_DESC(nak_holdoff_enable, "Enable the NAK holdoff");
 module_param(fiq_fsm_enable, bool, 0444);
-MODULE_PARM_DESC(fiq_fsm_enable, "Enable the FIQ to perform all split transactions");
+MODULE_PARM_DESC(fiq_fsm_enable, "Enable the FIQ to perform split transactions as defined by fiq_fsm_mask");
+module_param(fiq_fsm_mask, ushort, 0444);
+MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n"
+					"Bit 0/1 = Control OUT/IN\n"
+					"Bit 2/3 = Isochronous OUT/IN\n"
+					"Bit 4/5 = Bulk OUT/IN\n"
+					"Bit 6/7 = Interrupt OUT/IN\n"
+					"All other bits should be set 0.");
+
 
 /** @page "Module Parameters"
  *

@@ -165,14 +165,20 @@ enum fiq_fsm_state {
 	 */
 	FIQ_PER_SSPLIT_QUEUED,
 	FIQ_PER_SSPLIT_STARTED,
+	FIQ_PER_SSPLIT_LAST,
 
 	FIQ_PER_CSPLIT_WAIT, // SOF will subsequently queue the next packet
 	FIQ_PER_CSPLIT_NYET1, // Our first CSPLIT attempt resulted in a NYET.
 	FIQ_PER_CSPLIT_POLL, // For multiple CSPLITs (large isoc IN)
+	FIQ_PER_CSPLIT_LAST, // The last CSPLIT for a transaction has been issued.
 
 	FIQ_PER_SPLIT_DONE,
 	FIQ_PER_SPLIT_LS_ABORTED,
 	FIQ_PER_SPLIT_HS_ABORTED,
+
+	FIQ_HS_ISOC_TURBO,
+	FIQ_HS_ISOC_DONE,
+	FIQ_HS_ISOC_ABORTED,
 
 	FIQ_TEST,
 #ifdef FIQ_DEBUG
@@ -204,8 +210,6 @@ struct fiq_dma_info {
 };
 
 /* This overlay is the per-channel DMA slot for ease of access (avoids pointer mangling) */
-
-
 struct __attribute__((packed)) fiq_split_dma_slot {
 	u8 buf[188];
 };
@@ -213,7 +217,6 @@ struct __attribute__((packed)) fiq_split_dma_slot {
 struct  __attribute__((packed)) fiq_dma_channel {
 	struct fiq_split_dma_slot index[6];
 };
-
 
 /**
  * struct fiq_channel_state - FIQ state machine storage
@@ -276,6 +279,8 @@ struct fiq_state {
 	mphi_regs_t mphi_regs;
 	void *dwc_regs_base;
 	dma_addr_t dma_base;
+	/** Split transaction DMA bounce buffers */
+	struct fiq_dma_channel *fiq_dma;
 	void *dummy_send;
 	gintmsk_data_t gintmsk_saved;
 	haintmsk_data_t haintmsk_saved;
@@ -289,40 +294,6 @@ struct fiq_state {
 #endif
 	struct fiq_channel_state channel[0];
 };
-
-
-
-// /**
- // * struct fiq_dma_slot - a 188-byte DMA bounce buffer
- // * @buf:	Does what it says on the tin. 188 bytes is the maximum per-microframe split transaction
- // * 		data size.
- // * @len:	For OUT transfers, this is to be programmed into the host channel
- // * 		HCTSIZ register. For IN transfers, this is the actual amount of data received.
- // */
-// struct fiq_dma_slot {
-	// u8 buf[188];
-	// int len;
-// };
-
-// /**
- // * struct fiq_perchannel_dma - coherent DMA bounce buffer for a single host channel
- // * @slot[6]:	There can be up to 6 SSPLIT or CSPLIT transactions carrying data in/out
- // * 		per full-speed frame. Data to be transmitted OUT is written here by the driver
- // * 		for the FIQ to point the host channel's DMA to for each packet,
- // * 		and data transmitted IN is written to each of the slots in turn by
- // * 		the host channel's DMA.
- // * @index:	For OUT, the number of slots that have been filled with data to transmit.
- // * 		For IN, the number of slots that have received data.
- // *
- // * Each slot is 188 bytes of coherently allocated memory. The amount of data in each slot is variable,
- // * see the fiq_dma_slot struct.
- // */
-// struct fiq_perchannel_dma {
-	// /* we need at most 6 slots (max possible split-isoc OUT size) */
-	// struct fiq_dma_slot slot[6];
-	// /* for use mid-transaction, or to report that fewer than nrpackets were transferred */
-	// int index;
-// };
 
 
 /* must be called FIQ disabled if not from FIQ context */
@@ -373,16 +344,7 @@ struct fiq_state {
 //	return (hcchar.d32 & (1<<15)) ? 0 : 1;
 //}
 //
-//static inline int fiq_isoc_out(hcchar_data_t hcchar)
-//{
-//	if ((hcchar.d32 & ((1<<19) | (1<<18))) == 0x4000)
-//		if(hcchar.d32 & (1<<15))
-//			return 1;
-//	return 0;
-//}
-//
-//void dwc_otg_fiq_fsm(int num_channels, struct fiq_state *state, struct fiq_perchannel_dma *dma);
-//
+
 extern void dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels);
 
 extern void dwc_otg_fiq_nop(struct fiq_state *state);

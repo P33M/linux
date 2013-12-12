@@ -1010,8 +1010,8 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 		 * for use as transaction bounce buffers in a 2-D array. Our access into this chunk is done by some 
 		 * moderately readable array casts.
 		 */
-		hcd->fiq_dma = DWC_DMA_ALLOC((sizeof(struct fiq_dma_channel) * num_channels), &hcd->fiq_state->dma_base);
-		DWC_WARN("FIQ DMA bounce buffers: virt = 0x%08x dma = 0x%08x", (unsigned int)hcd->fiq_dma, (unsigned int)hcd->fiq_state->dma_base);
+		hcd->fiq_state->fiq_dma = DWC_DMA_ALLOC((sizeof(struct fiq_dma_channel) * num_channels), &hcd->fiq_state->dma_base);
+		DWC_WARN("FIQ DMA bounce buffers: virt = 0x%08x dma = 0x%08x", (unsigned int)hcd->fiq_state->fiq_dma, (unsigned int)hcd->fiq_state->dma_base);
 		
 		if (fiq_fsm_enable) {
 			int i;
@@ -1019,14 +1019,19 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 				hcd->fiq_state->channel[i].fsm = FIQ_PASSTHROUGH;
 			}
 			DWC_PRINTF("FIQ FSM acceleration enabled for :\n %s%s%s\n %s%s%s\n %s%s%s\n %s%s%s\n",
-						(fiq_fsm_mask & 0x3) ? "Control" : "", (fiq_fsm_mask & 0x1) ? " OUT" : "", (fiq_fsm_mask & 0x2) ? " IN" : "",
-						(fiq_fsm_mask & 0xC) ? "Isoc" : "", (fiq_fsm_mask & 0x4) ? " OUT" : "", (fiq_fsm_mask & 0x8) ? " IN" : "",
-						(fiq_fsm_mask & 0x30) ? "Bulk" : "", (fiq_fsm_mask & 0x10) ? " OUT" : "", (fiq_fsm_mask & 0x20) ? " IN" : "",
-						(fiq_fsm_mask & 0xC0) ? "Interrupt" : "", (fiq_fsm_mask & 0x40) ? " OUT" : "", (fiq_fsm_mask & 0x80) ? " IN" : "");
+					(fiq_fsm_mask & 0x3) ? "Control" : "", (fiq_fsm_mask & 0x1) ? " OUT" : "", (fiq_fsm_mask & 0x2) ? " IN" : "",
+					(fiq_fsm_mask & 0xC) ? "Isoc" : "", (fiq_fsm_mask & 0x4) ? " OUT" : "", (fiq_fsm_mask & 0x8) ? " IN" : "",
+					(fiq_fsm_mask & 0x30) ? "Bulk" : "", (fiq_fsm_mask & 0x10) ? " OUT" : "", (fiq_fsm_mask & 0x20) ? " IN" : "",
+					(fiq_fsm_mask & 0xC0) ? "Interrupt" : "", (fiq_fsm_mask & 0x40) ? " OUT" : "", (fiq_fsm_mask & 0x80) ? " IN" : "");
+
+			DWC_PRINTF("DMA slot addresses for channels:\n");
+			for (i=0; i < 6; i++) {
+				struct fiq_split_dma_slot *chan;
+				chan = &((struct fiq_dma_channel * )hcd->fiq_state->dma_base)[i].index[i];
+				DWC_PRINTF("Channel %d index %d = 0x%08x\n", i, i, chan);
+
+			}
 		}
-		
-		
-		
 	}
 
 	/* Initialize the Connection timeout timer. */
@@ -1531,18 +1536,22 @@ int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	int hub_addr, port_addr, frame, uframe;
 	struct fiq_channel_state *st = &hcd->fiq_state->channel[hc->hc_num];
 	
-	if (st->fsm != FIQ_PASSTHROUGH) 
+	if (hc->xfer_started)
 		return 0;
+	else
+		hc->xfer_started = 1;
+
 	st->nr_errors = 0;
 	
 	st->hcchar_copy.d32 = 0;
+	/* This is actually wrong for split isochronous - but never mind */
 	st->hcchar_copy.b.mps = hc->max_packet;
 	st->hcchar_copy.b.epdir = hc->ep_is_in;
 	st->hcchar_copy.b.devaddr = hc->dev_addr;
 	st->hcchar_copy.b.epnum = hc->ep_num;
 	st->hcchar_copy.b.eptype = hc->ep_type;
 	// oddfrm is tricky. the FIQ needs to modify this if it enables the transfer later
-	// due to a contended TT. No effect for non-periodic but must be set to 1.
+	// due to a contended TT.
 	if (hc->ep_type & 0x1) {
 		int frame;
 		frame = dwc_otg_hcd_get_frame_number(hcd);
@@ -1575,11 +1584,10 @@ int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	st->hctsiz_copy.b.pid = hc->data_pid_start;
 
 	if (hc->ep_is_in || (hc->xfer_len > hc->max_packet)) {
-		hc->xfer_len = hc->max_packet;
+		st->hctsiz_copy.b.xfersize = hc->max_packet;
 	} else if (!hc->ep_is_in && (hc->xfer_len > 188)) {
-		hc->xfer_len = 188;
+		st->hctsiz_copy.b.xfersize = 188;
 	}
-	st->hctsiz_copy.b.xfersize = hc->xfer_len;
 
 	if(qh->ep_type & 0x1)
 		// For LS periodic, set to 3 to enable local 3-strikes immediate retry (USB 11.18.4)
@@ -1596,6 +1604,31 @@ int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 		* in assign_and_init_hc(), but this is for the eventual transaction completion only. The FIQ
 		* must not touch internal driver state.
 		*/
+		if (qh->ep_is_in) {
+			st->hcdma_copy.d32 = (unsigned int)&((struct fiq_dma_channel *)hcd->fiq_state->dma_base)[hc->hc_num].index[0];
+		} else {
+			int len = hc->xfer_len;
+			void *ptr = hc->xfer_buff;
+			int n = 0;
+			if (hc->xfer_len > hc->max_packet)
+				BUG();
+			if (hc->align_buff)
+				BUG();
+			/* This is idiotic, as xfer_buff is a uint8_t */
+			while (len >= 188) {
+				st->dma_info.slot_len[n] = 188;
+				dwc_memcpy(&hcd->fiq_state->fiq_dma[hc->hc_num].index[n], ptr, 188);
+				ptr = ptr + 188;
+				len -= 188;
+				n++;
+			}
+			/* Bits left over? */
+			if (len > 0) {
+				st->dma_info.slot_len[n] = len;
+				dwc_memcpy(&hcd->fiq_state->fiq_dma[hc->hc_num].index[n], ptr, len);
+			}
+			DWC_PRINTF("Setup bounce buffer: %d slots channel %d xfer_len=%d", n, hc->hc_num, hc->xfer_len);
+		}
 	} else {
 		/* assign_init_hc has set it all up for us. Eurgh. */
 		if (hc->align_buff) {
@@ -1613,7 +1646,7 @@ int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	
 	/* TODO: for periodic, need to peek at fiq_state in
 	* order to decide on entry state - pending or queued. */
-	start_immediate = 1;
+
 	nrfsmqueue++;
 	frame = dwc_otg_hcd_get_frame_number(hcd);
 	uframe = frame & 0x7;
@@ -1631,6 +1664,7 @@ int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	// }
 	fiq_print(FIQDBG_INT, hcd->fiq_state, "FSMQ  %01d ", hc->hc_num);
 	local_fiq_disable();
+	start_immediate = 1;
 	DWC_WRITE_REG32(&hc_regs->hctsiz, st->hctsiz_copy.d32);
 	DWC_WRITE_REG32(&hc_regs->hcsplt, st->hcsplt_copy.d32);
 	DWC_WRITE_REG32(&hc_regs->hcdma, st->hcdma_copy.d32);

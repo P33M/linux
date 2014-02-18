@@ -45,9 +45,10 @@
 
 #include "dwc_otg_hcd.h"
 #include "dwc_otg_regs.h"
-#include "dwc_otg_mphi_fix.h"
+#include "dwc_otg_fiq_fsm.h"
 
-extern bool microframe_schedule, nak_holdoff_enable;
+extern bool microframe_schedule;
+extern uint16_t fiq_fsm_mask, nak_holdoff;
 
 //#define DEBUG_HOST_CHANNELS
 #ifdef DEBUG_HOST_CHANNELS
@@ -57,12 +58,6 @@ static int last_sel_trans_num_avail_hc_at_start = 0;
 static int last_sel_trans_num_avail_hc_at_end = 0;
 #endif /* DEBUG_HOST_CHANNELS */
 
-extern int g_next_sched_frame, g_np_count, g_np_sent;
-
-extern haint_data_t haint_saved;
-extern hcintmsk_data_t hcintmsk_saved[MAX_EPS_CHANNELS];
-extern hcint_data_t hcint_saved[MAX_EPS_CHANNELS];
-extern gintsts_data_t ginsts_saved;
 
 dwc_otg_hcd_t *dwc_otg_hcd_alloc_hcd(void)
 {
@@ -80,8 +75,8 @@ void dwc_otg_hcd_connect_timeout(void *ptr)
 	__DWC_ERROR("Device Not Connected/Responding\n");
 }
 
-#if defined(DEBUG)
-static void dump_channel_info(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
+
+void dump_channel_info(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 {
 	if (qh->channel != NULL) {
 		dwc_hc_t *hc = qh->channel;
@@ -136,9 +131,6 @@ static void dump_channel_info(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		}
 	}
 }
-#else
-#define dump_channel_info(hcd, qh)
-#endif /* DEBUG */
 
 /**
  * Work queue function for starting the HCD when A-Cable is connected.
@@ -295,7 +287,7 @@ static int32_t dwc_otg_hcd_disconnect_cb(void *p)
 	 */
 	dwc_otg_hcd->flags.b.port_connect_status_change = 1;
 	dwc_otg_hcd->flags.b.port_connect_status = 0;
-	if(fiq_fix_enable)
+	if(fiq_enable)
 		local_fiq_disable();
 	/*
 	 * Shutdown any transfers in process by clearing the Tx FIFO Empty
@@ -392,20 +384,20 @@ static int32_t dwc_otg_hcd_disconnect_cb(void *p)
 				channel->qh = NULL;
 			}
 		}
-		if(fiq_split_enable) {
+		if(fiq_fsm_enable) {
 			for(i=0; i < 128; i++) {
 				dwc_otg_hcd->hub_port[i] = 0;
 			}
-			haint_saved.d32 = 0;
+//			haint_saved.d32 = 0;
 			for(i=0; i < MAX_EPS_CHANNELS; i++) {
-				hcint_saved[i].d32 = 0;
-				hcintmsk_saved[i].d32 = 0;
+//				hcint_saved[i].d32 = 0;
+//				hcintmsk_saved[i].d32 = 0;
 			}
 		}
 
 	}
 
-	if(fiq_fix_enable)
+	if(fiq_enable)
 		local_fiq_enable();
 
 	if (dwc_otg_hcd->fops->disconnect) {
@@ -526,6 +518,16 @@ int dwc_otg_hcd_urb_enqueue(dwc_otg_hcd_t * hcd,
 			}
 	}
 
+	/* Some core configurations cannot support LS traffic on a FS root port */
+	if ((hcd->fops->speed(hcd, dwc_otg_urb->priv) == USB_SPEED_LOW) &&
+		(hcd->core_if->hwcfg2.b.fs_phy_type == 1) &&
+		(hcd->core_if->hwcfg2.b.hs_phy_type == 1)) {
+			hprt0.d32 = DWC_READ_REG32(hcd->core_if->host_if->hprt0);
+			if (hprt0.b.prtspd == DWC_HPRT0_PRTSPD_FULL_SPEED) {
+				return -DWC_E_NO_DEVICE;
+			}
+	}
+
 	qtd = dwc_otg_hcd_qtd_create(dwc_otg_urb, atomic_alloc);
 	if (qtd == NULL) {
 		DWC_ERROR("DWC OTG HCD URB Enqueue failed creating QTD\n");
@@ -542,7 +544,7 @@ int dwc_otg_hcd_urb_enqueue(dwc_otg_hcd_t * hcd,
 	}
 #endif
 	intr_mask.d32 = DWC_READ_REG32(&hcd->core_if->core_global_regs->gintmsk);
-	if(!intr_mask.b.sofintr) needs_scheduling = 1;
+	if(!intr_mask.b.sofintr || fiq_enable) needs_scheduling = 1;
 	if((((dwc_otg_qh_t *)ep_handle)->ep_type == UE_BULK) && !(qtd->urb->flags & URB_GIVEBACK_ASAP))
 		/* Do not schedule SG transactions until qtd has URB_GIVEBACK_ASAP set */
 		needs_scheduling = 0;
@@ -623,7 +625,6 @@ int dwc_otg_hcd_urb_dequeue(dwc_otg_hcd_t * hcd,
 			dwc_otg_hc_halt(hcd->core_if, qh->channel,
 					DWC_OTG_HC_XFER_URB_DEQUEUE);
 
-			dwc_otg_hcd_release_port(hcd, qh);
 		}
 	}
 
@@ -759,7 +760,6 @@ static void completion_tasklet_func(void *ptr)
 
 		usb_hcd_giveback_urb(hcd->priv, urb, urb->status);
 
-		fiq_print(FIQDBG_PORTHUB, "COMPLETE");
 
 		DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
 	}
@@ -854,6 +854,34 @@ void dwc_otg_hcd_power_up(void *ptr)
 	cil_hcd_start(core_if);
 }
 
+void dwc_otg_cleanup_fiq_channel(dwc_otg_hcd_t *hcd, uint32_t num)
+{
+	struct fiq_channel_state *st = &hcd->fiq_state->channel[num];
+	struct fiq_dma_blob *blob = hcd->fiq_dmab;
+	int i;
+
+	st->fsm = FIQ_PASSTHROUGH;
+	st->hcchar_copy.d32 = 0;
+	st->hcsplt_copy.d32 = 0;
+	st->hcint_copy.d32 = 0;
+	st->hcintmsk_copy.d32 = 0;
+	st->hctsiz_copy.d32 = 0;
+	st->hcdma_copy.d32 = 0;
+	st->nr_errors = 0;
+	st->hub_addr = 0;
+	st->port_addr = 0;
+	st->expected_uframe = 0;
+	st->nrpackets = 0;
+	st->dma_info.index = 0;
+	for (i = 0; i < 6; i++)
+		st->dma_info.slot_len[i] = 255;
+	st->hs_isoc_info.index = 0;
+	st->hs_isoc_info.iso_desc = NULL;
+	st->hs_isoc_info.nrframes = 0;
+	
+	DWC_MEMSET(&blob->channel[num].index[0], 0x6b, 1128);
+}
+
 /**
  * Frees secondary storage associated with the dwc_otg_hcd structure contained
  * in the struct usb_hcd field.
@@ -907,6 +935,7 @@ static void dwc_otg_hcd_free(dwc_otg_hcd_t * dwc_otg_hcd)
 	DWC_TIMER_FREE(dwc_otg_hcd->conn_timer);
 	DWC_TASK_FREE(dwc_otg_hcd->reset_tasklet);
 	DWC_TASK_FREE(dwc_otg_hcd->completion_tasklet);
+	DWC_FREE(dwc_otg_hcd->fiq_state);
 
 #ifdef DWC_DEV_SRPCAP
 	if (dwc_otg_hcd->core_if->power_down == 2 &&
@@ -916,7 +945,7 @@ static void dwc_otg_hcd_free(dwc_otg_hcd_t * dwc_otg_hcd)
 #endif
 	DWC_FREE(dwc_otg_hcd);
 }
-
+static void *fiq_stack;
 int init_hcd_usecs(dwc_otg_hcd_t *_hcd);
 
 int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
@@ -977,6 +1006,60 @@ int dwc_otg_hcd_init(dwc_otg_hcd_t * hcd, dwc_otg_core_if_t * core_if)
 #endif
 		DWC_DEBUGPL(DBG_HCDV, "HCD Added channel #%d, hc=%p\n", i,
 			    channel);
+	}
+
+	if (fiq_enable) {
+		hcd->fiq_state = DWC_ALLOC(sizeof(struct fiq_state) + (sizeof(struct fiq_channel_state) * num_channels));
+		if (!hcd->fiq_state) {
+			retval = -DWC_E_NO_MEMORY;
+			DWC_ERROR("%s: cannot allocate fiq_state structure\n", __func__);
+			dwc_otg_hcd_free(hcd);
+			goto out;
+		}
+		DWC_MEMSET(hcd->fiq_state, 0, (sizeof(struct fiq_state) + (sizeof(struct fiq_channel_state) * num_channels)));
+		
+		for (i = 0; i < num_channels; i++) {
+			hcd->fiq_state->channel[i].fsm = FIQ_PASSTHROUGH;
+		}
+		hcd->fiq_state->dummy_send = DWC_ALLOC_ATOMIC(16);
+		
+		hcd->fiq_stack = DWC_ALLOC(sizeof(struct fiq_stack));
+		if (!hcd->fiq_stack) {
+			retval = -DWC_E_NO_MEMORY;
+			DWC_ERROR("%s: cannot allocate fiq_stack structure\n", __func__);
+			dwc_otg_hcd_free(hcd);
+			goto out;
+		}
+		hcd->fiq_stack->magic1 = 0xDEADBEEF;
+		hcd->fiq_stack->magic2 = 0xD00DFEED;
+		fiq_stack = hcd->fiq_stack;
+		hcd->fiq_state->gintmsk_saved.d32 = ~0;
+		hcd->fiq_state->haintmsk_saved.b2.chint = ~0;
+
+		/* This bit is terrible and uses no API, but necessary. The FIQ has no concept of DMA pools
+		 * (and if it did, would be a lot slower). This allocates a chunk of memory (~9kiB for 8 host channels)
+		 * for use as transaction bounce buffers in a 2-D array. Our access into this chunk is done by some 
+		 * moderately readable array casts.
+		 */
+		hcd->fiq_dmab = DWC_DMA_ALLOC((sizeof(struct fiq_dma_channel) * num_channels), &hcd->fiq_state->dma_base);
+		DWC_WARN("FIQ DMA bounce buffers: virt = 0x%08x dma = 0x%08x len=%d",
+				(unsigned int)hcd->fiq_dmab, (unsigned int)hcd->fiq_state->dma_base,
+				sizeof(struct fiq_dma_channel) * num_channels);
+				
+		DWC_MEMSET(hcd->fiq_dmab, 0x6b, 9024);
+		
+		/* pointer for debug in fiq_print */
+		hcd->fiq_state->fiq_dmab = hcd->fiq_dmab;
+		if (fiq_fsm_enable) {
+			int i;
+			for (i=0; i < hcd->core_if->core_params->host_channels; i++) {
+				dwc_otg_cleanup_fiq_channel(hcd, i);
+			}
+			DWC_PRINTF("FIQ FSM acceleration enabled for :\n%s%s%s",
+				(fiq_fsm_mask & 0x1) ? "Non-periodic Split Transactions\n" : "",
+				(fiq_fsm_mask & 0x2) ? "Periodic Split Transactions\n" : "", 
+				(fiq_fsm_mask & 0x4) ? "High-Speed Isochronous Endpoints\n" : "");
+		}
 	}
 
 	/* Initialize the Connection timeout timer. */
@@ -1115,6 +1198,8 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 
 	/* Remove the host channel from the free list. */
 	DWC_CIRCLEQ_REMOVE_INIT(&hcd->free_hc_list, hc, hc_list_entry);
+	
+	//DWC_WARN("Picked HC %d", hc->hc_num);
 
 	qh->channel = hc;
 
@@ -1176,7 +1261,8 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		hc->do_split = 1;
 		hc->xact_pos = qtd->isoc_split_pos;
 		/* We don't need to do complete splits anymore */
-		if(fiq_split_enable)
+//		if(fiq_fsm_enable)
+		if (0)
 			hc->complete_split = qtd->complete_split = 0;
 		else
 			hc->complete_split = qtd->complete_split;
@@ -1322,67 +1408,467 @@ static void assign_and_init_hc(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 
 	if (hcd->core_if->dma_desc_enable)
 		hc->desc_list_addr = qh->desc_list_dma;
-
+	
 	dwc_otg_hc_init(hcd->core_if, hc);
 	hc->qh = qh;
 }
 
-/*
-** Check the transaction to see if the port / hub has already been assigned for
-** a split transaction
-**
-** Return 0 - Port is already in use
-*/
-int dwc_otg_hcd_allocate_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
+
+/**
+ * fiq_fsm_transaction_suitable() - Test a QH for compatibility with the FIQ
+ * @qh:	pointer to the endpoint's queue head
+ *
+ * Transaction start/end control flow is grafted onto the existing dwc_otg
+ * mechanisms, to avoid spaghettifying the functions more than they already are.
+ * This function's eligibility check is altered by debug parameter.
+ *
+ * Returns: 0 for unsuitable, 1 implies the FIQ can be enabled for this transaction.
+ */
+
+int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh)
 {
-	uint32_t hub_addr, port_addr;
+	if (qh->do_split) {
+		switch (qh->ep_type) {
+		case UE_CONTROL:
+		case UE_BULK:
+			if (fiq_fsm_mask & (1 << 0))
+				return 1;
+			break;
+		case UE_INTERRUPT:
+		case UE_ISOCHRONOUS:
+			if (fiq_fsm_mask & (1 << 1))
+				return 1;
+			break;
+		default:
+			break;
+		}
+	} else if (qh->ep_type == UE_ISOCHRONOUS) {
+		if (fiq_fsm_mask & (1 << 2)) {
+			/* HS ISOCH support. We test for compatibility:
+			 * - DWORD aligned buffers
+			 * - Must be at least 2 transfers (otherwise pointless to use the FIQ)
+			 * If yes, then the fsm enqueue function will handle the state machine setup.
+			 */
+			dwc_otg_qtd_t *qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
+			dwc_otg_hcd_urb_t *urb = qtd->urb;
+			struct dwc_otg_hcd_iso_packet_desc (*iso_descs)[0] = &urb->iso_descs;
+			int nr_iso_frames = urb->packet_count;
+			int i;
+			uint32_t ptr;
 
-	if(!fiq_split_enable)
-		return 0;
-
-	hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
-
-	if(hcd->hub_port[hub_addr] & (1 << port_addr))
-	{
-		fiq_print(FIQDBG_PORTHUB, "H%dP%d:S%02d", hub_addr, port_addr, qh->skip_count);
-
-		qh->skip_count++;
-
-		if(qh->skip_count > 40000)
-		{
-			printk_once(KERN_ERR "Error: Having to skip port allocation");
-			local_fiq_disable();
-			BUG();
+			if (nr_iso_frames < 2)
+				return 0;
+			for (i = 0; i < nr_iso_frames; i++) {
+				ptr = urb->dma + iso_descs[i]->offset;
+				if (ptr & 0x3) {
+					printk_ratelimited("%s: Non-Dword aligned isochronous frame offset."
+							" Cannot queue FIQ-accelerated transfer to device %d endpoint %d\n",
+							__FUNCTION__, qh->channel->dev_addr, qh->channel->ep_num);
+					return 0;
+				}
+			}
+			/* return 1; */
+			/* HS isoc is NYI */
 			return 0;
 		}
-		return 1;
 	}
-	else
-	{
-		qh->skip_count = 0;
-		hcd->hub_port[hub_addr] |= 1 << port_addr;
-		fiq_print(FIQDBG_PORTHUB, "H%dP%d:A %d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
-#ifdef FIQ_DEBUG
-		hcd->hub_port_alloc[hub_addr * 16 + port_addr] = dwc_otg_hcd_get_frame_number(hcd);
-#endif
-		return 0;
+	return 0;
+}
+
+/**
+ * fiq_fsm_setup_periodic_dma() - Set up DMA bounce buffers
+ * @hcd: Pointer to the dwc_otg_hcd struct
+ * @qh: Pointer to the endpoint's queue head
+ *
+ * Periodic split transactions are transmitted modulo 188 bytes.
+ * This necessitates slicing data up into buckets for isochronous out
+ * and fixing up the DMA address for all IN transfers.
+ * 
+ * Returns 1 if the DMA bounce buffers have been used, 0 if the default
+ * HC buffer has been used.
+ */
+int fiq_fsm_setup_periodic_dma(dwc_otg_hcd_t *hcd, struct fiq_channel_state *st, dwc_otg_qh_t *qh)
+ {
+	int i = 0;
+	uint32_t frame_length, nrslots, last_size;
+	uint8_t *ptr = NULL;
+	dwc_hc_t *hc = qh->channel;
+	struct fiq_dma_blob *blob;
+	struct dwc_otg_hcd_iso_packet_desc *frame_desc;
+	
+	
+	for (i = 0; i < 6; i++) {
+		st->dma_info.slot_len[i] = 255;
+	}
+	st->dma_info.index = 0;
+	i = 0;
+	if (hc->ep_is_in) {
+		/* 
+		 * Set dma_regs to bounce buffer. FIQ will update the 
+		 * state depending on transaction progress.
+		 */
+		blob = (struct fiq_dma_blob *) hcd->fiq_state->dma_base;
+		st->hcdma_copy.d32 = (uint32_t) &blob->channel[hc->hc_num].index[0].buf[0]; 
+		return 1;
+	} else {
+		if (qh->ep_type == UE_ISOCHRONOUS) {
+			
+			dwc_otg_qtd_t *qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
+			
+			frame_desc = &qtd->urb->iso_descs[qtd->isoc_frame_index];
+			frame_length = frame_desc->length;
+			
+			/* Virtual address for bounce buffers */
+			blob = hcd->fiq_dmab;
+			
+			ptr = qtd->urb->buf + frame_desc->offset;
+			nrslots = (frame_length + 187) / 188;
+			last_size = frame_length % 188;
+			//printk(KERN_INFO "len = %d nrslots = %d last_size=%d\n", frame_length, nrslots, last_size);
+			if (frame_length == 0) {
+				/*
+				 * for isochronous transactions, we must still transmit a packet
+				 * even if the length is zero.
+				 */
+				st->dma_info.slot_len[0] = 0;
+				st->nrpackets = 1;
+			} else {
+				do {
+					if (i < nrslots - 1) {
+						dwc_memcpy(&blob->channel[hc->hc_num].index[i].buf[0], ptr, 188);
+						st->dma_info.slot_len[i] = 188;
+						ptr += 188;
+					} else {
+						dwc_memcpy(&blob->channel[hc->hc_num].index[i].buf[0], ptr, last_size);
+						st->dma_info.slot_len[i] = last_size;
+						ptr += last_size;
+					}
+					i++;
+				} while (i <= nrslots - 1);
+				st->nrpackets = i;
+			}
+			/* Point the HC at the DMA address of the bounce buffers */
+			blob = (struct fiq_dma_blob *) hcd->fiq_state->dma_base;
+			/* Bugette: for some reason, memcpy corrupts the data in the bounce buffers. May be a
+			 * cache coherency issue */
+			//st->hcdma_copy.d32 = (uint32_t) &blob->channel[hc->hc_num].index[0].buf[0];
+			//ptr = qtd->urb->buf + frame_desc->offset;
+			st->hcdma_copy.d32 = (uint32_t) qtd->urb->dma + frame_desc->offset;
+			if (st->hcdma_copy.d32 & 0x3)
+				BUG();
+			/* fixup xfersize to the actual packet size */
+			st->hctsiz_copy.b.pid = 0;
+			st->hctsiz_copy.b.xfersize = st->dma_info.slot_len[0];
+			return 1;
+		} else {
+			/* For interrupt, single OUT packet required, goes in the SSPLIT from hc_buff. */
+			return 0;
+		}
 	}
 }
-void dwc_otg_hcd_release_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh)
+
+
+int fiq_fsm_queue_isoc_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 {
-	uint32_t hub_addr, port_addr;
+	dwc_hc_t *hc = qh->channel;
+	dwc_otg_hc_regs_t *hc_regs = hcd->core_if->host_if->hc_regs[hc->hc_num];
+	dwc_otg_qtd_t *qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
+	int frame;
+	struct fiq_channel_state *st = &hcd->fiq_state->channel[hc->hc_num];
+	int xfer_len, nrpackets;
+	hcdma_data_t hcdma;
+	
+	if (st->fsm != FIQ_PASSTHROUGH) 
+		return 0;
+	
+	st->nr_errors = 0;
+	
+	st->hcchar_copy.d32 = 0;
+	st->hcchar_copy.b.mps = hc->max_packet;
+	st->hcchar_copy.b.epdir = hc->ep_is_in;
+	st->hcchar_copy.b.devaddr = hc->dev_addr;
+	st->hcchar_copy.b.epnum = hc->ep_num;
+	st->hcchar_copy.b.eptype = hc->ep_type;
+	
+	st->hcintmsk_copy.b.chhltd = 1;
+	
+	frame = dwc_otg_hcd_get_frame_number(hcd);
+	st->hcchar_copy.b.oddfrm = (frame & 0x1) ? 0 : 1;
+	
+	st->hcchar_copy.b.lspddev = 0;
+	/* Enable the channel later as a final register write. */
+	
+	st->hcsplt_copy.d32 = 0;
+	
+	st->hs_isoc_info.iso_desc = (struct dwc_otg_hcd_iso_packet_desc *) &qtd->urb->iso_descs;
+	/* grab the next DMA address offset from the array */
+	hcdma.d32 = st->hcdma_copy.d32 + st->hs_isoc_info.iso_desc[0].offset;
 
-	if(!fiq_split_enable)
-		return;
+	/* We need to set multi_count. This is a bit tricky - has to be set per-transaction as
+	 * the core needs to be told to send the correct number. Caution: for IN transfers,
+	 * this is always set to the maximum size of the endpoint. */
+	xfer_len = st->hs_isoc_info.iso_desc[0].length;
+	nrpackets = (xfer_len + st->hcchar_copy.b.mps - 1) / st->hcchar_copy.b.mps;
+	if (nrpackets == 0)
+		nrpackets = 1;
+	st->hcchar_copy.b.multicnt = nrpackets;
+	st->hctsiz_copy.b.pktcnt = nrpackets;
 
-	hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
+	/* Initial PID also needs to be set */
+	if (st->hcchar_copy.b.epdir == 0) {
+		st->hctsiz_copy.b.xfersize = xfer_len;
+		switch (st->hcchar_copy.b.multicnt) {
+		case 1:
+			st->hctsiz_copy.b.pid = DWC_PID_DATA0;
+			break;
+		case 2:
+		case 3:
+			st->hctsiz_copy.b.pid = DWC_PID_MDATA;
+			break;
+		}
 
-	hcd->hub_port[hub_addr] &= ~(1 << port_addr);
-#ifdef FIQ_DEBUG
-	hcd->hub_port_alloc[hub_addr * 16 + port_addr] = -1;
-#endif
-	fiq_print(FIQDBG_PORTHUB, "H%dP%d:RO%d", hub_addr, port_addr, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->pipe_info.ep_num);
+	} else {
+		switch (st->hcchar_copy.b.multicnt) {
+		st->hctsiz_copy.b.xfersize = nrpackets * st->hcchar_copy.b.mps;
+		case 1:
+			st->hctsiz_copy.b.pid = DWC_PID_DATA0;
+			break;
+		case 2:
+			st->hctsiz_copy.b.pid = DWC_PID_DATA1;
+			break;
+		case 3:
+			st->hctsiz_copy.b.pid = DWC_PID_DATA2;
+			break;
+		}
+	}
 
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "FSMQ  %01d ", hc->hc_num);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "MULT: %02d", st->hcchar_copy.b.multicnt);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "NPTK: %02d", st->hctsiz_copy.b.pktcnt);
+	local_fiq_disable();
+	st->fsm = FIQ_HS_ISOC_TURBO;
+	DWC_WRITE_REG32(&hc_regs->hctsiz, st->hctsiz_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcsplt, st->hcsplt_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcdma, st->hcdma_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcintmsk, st->hcintmsk_copy.d32);
+	st->hcchar_copy.b.chen = 1;
+	DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
+	mb();
+	local_fiq_enable();
+	return 0;
+}
+
+
+/**
+ * fiq_fsm_queue_split_transaction() - Set up a host channel and FIQ state
+ * @hcd: Pointer to the dwc_otg_hcd struct
+ * @qh: Pointer to the endpoint's queue head
+ *
+ * This overrides the dwc_otg driver's normal method of queueing a transaction.
+ * Called from dwc_otg_hcd_queue_transactions(), this performs specific setup
+ * for the nominated host channel.
+ *
+ * For periodic transfers, it also peeks at the FIQ state to see if an immediate
+ * start is possible. If not, then the FIQ is left to start the transfer.
+ */
+int fiq_fsm_queue_split_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
+{
+	int start_immediate = 1, i;
+	hfnum_data_t hfnum;
+	dwc_hc_t *hc = qh->channel;
+	dwc_otg_hc_regs_t *hc_regs = hcd->core_if->host_if->hc_regs[hc->hc_num];
+	/* Program HC registers, setup FIQ_state, examine FIQ if periodic, start transfer (not if uframe 5) */
+	int hub_addr, port_addr, frame, uframe;
+	struct fiq_channel_state *st = &hcd->fiq_state->channel[hc->hc_num];
+	
+	if (st->fsm != FIQ_PASSTHROUGH) 
+		return 0;
+	st->nr_errors = 0;
+	
+	st->hcchar_copy.d32 = 0;
+	st->hcchar_copy.b.mps = hc->max_packet;
+	st->hcchar_copy.b.epdir = hc->ep_is_in;
+	st->hcchar_copy.b.devaddr = hc->dev_addr;
+	st->hcchar_copy.b.epnum = hc->ep_num;
+	st->hcchar_copy.b.eptype = hc->ep_type;
+	if (hc->ep_type & 0x1) {
+		if (hc->ep_is_in)
+			st->hcchar_copy.b.multicnt = 3;
+		else
+			/* Docs say set this to 1, but driver sets to 0! */
+			st->hcchar_copy.b.multicnt = 0;
+	} else {
+		st->hcchar_copy.b.multicnt = 1;
+		st->hcchar_copy.b.oddfrm = 0;
+	}
+	st->hcchar_copy.b.lspddev = (hc->speed == DWC_OTG_EP_SPEED_LOW) ? 1 : 0;
+	/* Enable the channel later as a final register write. */
+	
+	st->hcsplt_copy.d32 = 0;
+	if(qh->do_split) {
+		hcd->fops->hub_info(hcd, DWC_CIRCLEQ_FIRST(&qh->qtd_list)->urb->priv, &hub_addr, &port_addr);
+		st->hcsplt_copy.b.compsplt = 0;
+		st->hcsplt_copy.b.spltena = 1;
+		// XACTPOS is for isoc-out only but needs initialising anyway.
+		st->hcsplt_copy.b.xactpos = ISOC_XACTPOS_ALL;
+		if((qh->ep_type == DWC_OTG_EP_TYPE_ISOC) && (!qh->ep_is_in)) {
+			/* For packetsize 0 < L < 188, ISOC_XACTPOS_ALL. 
+			 * for longer than this, ISOC_XACTPOS_BEGIN and the FIQ
+			 * will update as necessary.
+			 */
+			if (hc->xfer_len > 188) {
+				st->hcsplt_copy.b.xactpos = ISOC_XACTPOS_BEGIN;
+			}
+		}
+		st->hcsplt_copy.b.hubaddr = (uint8_t) hub_addr;
+		st->hcsplt_copy.b.prtaddr = (uint8_t) port_addr;
+		st->hub_addr = hub_addr;
+		st->port_addr = port_addr;
+	}
+
+	st->hctsiz_copy.d32 = 0;
+	st->hctsiz_copy.b.dopng = 0;
+	st->hctsiz_copy.b.pid = hc->data_pid_start;
+
+	if (hc->ep_is_in || (hc->xfer_len > hc->max_packet)) {
+		hc->xfer_len = hc->max_packet;
+	} else if (!hc->ep_is_in && (hc->xfer_len > 188)) {
+		hc->xfer_len = 188;
+	}
+	st->hctsiz_copy.b.xfersize = hc->xfer_len;
+ 
+	st->hctsiz_copy.b.pktcnt = 1; 
+
+	if (hc->ep_type & 0x1) {
+		/* 
+		 * For potentially multi-packet transfers, must use the DMA bounce buffers. For IN transfers,
+		 * the DMA address is the address of the first 188byte slot buffer in the bounce buffer array.
+		 * For multi-packet OUT transfers, we need to copy the data into the bounce buffer array so the FIQ can punt
+		 * the right address out as necessary. hc->xfer_buff and hc->xfer_len have already been set
+		 * in assign_and_init_hc(), but this is for the eventual transaction completion only. The FIQ
+		 * must not touch internal driver state.
+		 */
+		if(!fiq_fsm_setup_periodic_dma(hcd, st, qh)) {
+			if (hc->align_buff) {
+				st->hcdma_copy.d32 = hc->align_buff;
+			} else {
+				st->hcdma_copy.d32 = ((unsigned long) hc->xfer_buff & 0xFFFFFFFF);
+			}
+		}
+	} else {
+		if (hc->align_buff) {
+			st->hcdma_copy.d32 = hc->align_buff;
+		} else {
+			st->hcdma_copy.d32 = ((unsigned long) hc->xfer_buff & 0xFFFFFFFF);
+		}
+	}
+	/* The FIQ depends upon no other interrupts being enabled except channel halt. 
+	 * Fixup channel interrupt mask. */
+	st->hcintmsk_copy.d32 = 0;
+	st->hcintmsk_copy.b.chhltd = 1;
+	st->hcintmsk_copy.b.ahberr = 1;
+	
+	DWC_WRITE_REG32(&hc_regs->hcdma, st->hcdma_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hctsiz, st->hctsiz_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcsplt, st->hcsplt_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
+	DWC_WRITE_REG32(&hc_regs->hcintmsk, st->hcintmsk_copy.d32);
+
+	local_fiq_disable();
+	mb();
+			
+	if (hc->ep_type & 0x1) {
+		hfnum.d32 = DWC_READ_REG32(&hcd->core_if->host_if->host_global_regs->hfnum);
+		frame = (hfnum.b.frnum & ~0x7) >> 3;
+		uframe = hfnum.b.frnum & 0x7;
+		if (hfnum.b.frrem < 1600) {
+			/* Prevent queueing near EOF1. Bad things happen if a periodic
+			 * split transaction is queued very close to EOF.
+			 */
+			start_immediate = 0;
+		} else if (uframe == 5) {
+			start_immediate = 0;
+		} else if (hc->ep_type == UE_ISOCHRONOUS) {
+			start_immediate = 0;
+		} else {
+			/* Search through all host channels to determine if a transaction
+			 * is currently in progress */
+			for (i = 0; i < hcd->core_if->core_params->host_channels; i++) {
+				if (i == hc->hc_num || hcd->fiq_state->channel[i].fsm == FIQ_PASSTHROUGH)
+					continue;
+				switch (hcd->fiq_state->channel[i].fsm) {
+				/* TT is reserved for channels that are in the middle of a periodic
+				 * split transaction.
+				 */
+				case FIQ_PER_SSPLIT_STARTED:
+				case FIQ_PER_CSPLIT_WAIT:
+				case FIQ_PER_CSPLIT_NYET1:
+				case FIQ_PER_CSPLIT_POLL:
+				case FIQ_PER_ISO_OUT_ACTIVE:
+				case FIQ_PER_ISO_OUT_LAST:
+					if (hcd->fiq_state->channel[i].hub_addr == hub_addr &&
+							hcd->fiq_state->channel[i].port_addr == port_addr) {
+						start_immediate = 0;
+					}
+					break;
+				default:
+					break;
+				}	
+				if (!start_immediate)
+					break;
+			}
+		}
+	}
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "FSMQ %01d %01d", hc->hc_num, start_immediate);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "H:%02dP:%02d", hub_addr, port_addr);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hctsiz_copy.d32);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hcdma_copy.d32);
+	switch (hc->ep_type) {
+		case UE_CONTROL:
+		case UE_BULK:
+			st->fsm = FIQ_NP_SSPLIT_STARTED;
+			break;
+		case UE_ISOCHRONOUS:
+			if (hc->ep_is_in) {
+				if (start_immediate) {			
+					st->fsm = FIQ_PER_SSPLIT_STARTED;
+				} else {
+					st->fsm = FIQ_PER_SSPLIT_QUEUED;
+				}
+			} else {
+				if (start_immediate) {
+					/* Single-isoc OUT packets don't require FIQ involvement */
+					if (st->nrpackets == 1) {
+						st->fsm = FIQ_PER_ISO_OUT_LAST;
+					} else {
+						st->fsm = FIQ_PER_ISO_OUT_ACTIVE;
+					}
+				} else {
+					st->fsm = FIQ_PER_ISO_OUT_PENDING;
+				}
+			}
+			break;
+		case UE_INTERRUPT:
+				if (start_immediate) {			
+					st->fsm = FIQ_PER_SSPLIT_STARTED;
+				} else {
+					st->fsm = FIQ_PER_SSPLIT_QUEUED;
+				}
+		default:
+			break;
+	}
+	if (start_immediate) {
+		/* Set the oddfrm bit as close as possible to actual queueing */
+		frame = dwc_otg_hcd_get_frame_number(hcd);
+		st->expected_uframe = (frame + 1) & 0x3FFF;
+		st->hcchar_copy.b.oddfrm = (frame & 0x1) ? 0 : 1;
+		st->hcchar_copy.b.chen = 1;
+		DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
+	}
+	mb();
+	local_fiq_enable();
+	return 0;
 }
 
 
@@ -1399,15 +1885,10 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 {
 	dwc_list_link_t *qh_ptr;
 	dwc_otg_qh_t *qh;
-	dwc_otg_qtd_t *qtd;
 	int num_channels;
 	dwc_irqflags_t flags;
 	dwc_spinlock_t *channel_lock = hcd->channel_lock;
 	dwc_otg_transaction_type_e ret_val = DWC_OTG_TRANSACTION_NONE;
-
-#ifdef DEBUG_SOF
-	DWC_DEBUGPL(DBG_HCD, "  Select Transactions\n");
-#endif
 
 #ifdef DEBUG_HOST_CHANNELS
 	last_sel_trans_num_per_scheduled = 0;
@@ -1423,26 +1904,11 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 
 		qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
 
-		if(qh->do_split) {
-			qtd = DWC_CIRCLEQ_FIRST(&qh->qtd_list);
-			if(!(qh->ep_type == UE_ISOCHRONOUS &&
-					(qtd->isoc_split_pos == DWC_HCSPLIT_XACTPOS_MID ||
-					qtd->isoc_split_pos == DWC_HCSPLIT_XACTPOS_END))) {
-				if(dwc_otg_hcd_allocate_port(hcd, qh))
-				{
-					qh_ptr = DWC_LIST_NEXT(qh_ptr);
-					g_next_sched_frame = dwc_frame_num_inc(dwc_otg_hcd_get_frame_number(hcd), 1);
-					continue;
-				}
-			}
-		}
-
 		if (microframe_schedule) {
 			// Make sure we leave one channel for non periodic transactions.
 			DWC_SPINLOCK_IRQSAVE(channel_lock, &flags);
 			if (hcd->available_host_channels <= 1) {
 				DWC_SPINUNLOCK_IRQRESTORE(channel_lock, flags);
-				if(qh->do_split) dwc_otg_hcd_release_port(hcd, qh);
 				break;
 			}
 			hcd->available_host_channels--;
@@ -1478,29 +1944,27 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 	       !DWC_CIRCLEQ_EMPTY(&hcd->free_hc_list)) {
 
 		qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
-
 		/*
 		 * Check to see if this is a NAK'd retransmit, in which case ignore for retransmission
 		 * we hold off on bulk retransmissions to reduce NAK interrupt overhead for full-speed
 		 * cheeky devices that just hold off using NAKs
 		 */
-		if (nak_holdoff_enable && qh->do_split) {
-			if (qh->nak_frame != 0xffff &&
-				dwc_full_frame_num(qh->nak_frame) ==
-				dwc_full_frame_num(dwc_otg_hcd_get_frame_number(hcd))) {
-				/*
-				 * Revisit: Need to avoid trampling on periodic scheduling.
-				 * Currently we are safe because g_np_count != g_np_sent whenever we hit this,
-				 * but if this behaviour is changed then periodic endpoints will get a slower
-				 * polling rate.
-				 */
-				g_next_sched_frame = ((qh->nak_frame + 8) & ~7) & DWC_HFNUM_MAX_FRNUM;
-				qh_ptr = DWC_LIST_NEXT(qh_ptr);
-				continue;
-			} else {
-				qh->nak_frame = 0xffff;
+		if (nak_holdoff && qh->do_split) {
+			if (qh->nak_frame != 0xffff) {
+				uint16_t next_frame = dwc_frame_num_inc(qh->nak_frame, (qh->ep_type == UE_BULK) ? nak_holdoff : 8);
+				uint16_t frame = dwc_otg_hcd_get_frame_number(hcd);
+				if (dwc_frame_num_le(frame, next_frame)) {
+					if(dwc_frame_num_le(next_frame, hcd->fiq_state->next_sched_frame)) {
+						hcd->fiq_state->next_sched_frame = next_frame;
+					}
+					qh_ptr = DWC_LIST_NEXT(qh_ptr);
+					continue;
+				} else {
+					qh->nak_frame = 0xFFFF;
+				}
 			}
 		}
+
 
 		if (microframe_schedule) {
 				DWC_SPINLOCK_IRQSAVE(channel_lock, &flags);
@@ -1527,12 +1991,30 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 				   &qh->qh_list_entry);
 		DWC_SPINUNLOCK_IRQRESTORE(channel_lock, flags);
 
-		g_np_sent++;
+
 
 		if (!microframe_schedule)
 			hcd->non_periodic_channels++;
 	}
-
+	/* we moved a non-periodic QH to the active schedule. If the inactive queue is empty,
+	 * stop the FIQ from kicking us. We could potentially still have elements here if we
+	 * ran out of host channels.
+	 */
+	if (DWC_LIST_EMPTY(&hcd->non_periodic_sched_inactive)) {
+			hcd->fiq_state->kick_np_queues = 0;
+	} else {
+		/* For each entry remaining in the NP inactive queue,
+		 * if this a NAK'd retransmit then don't set the kick flag.
+		 */
+		if(nak_holdoff) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->non_periodic_sched_inactive) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				if (qh->nak_frame == 0xFFFF) {
+					hcd->fiq_state->kick_np_queues = 1;
+				}
+			}
+		}
+	}
 	if(!DWC_LIST_EMPTY(&hcd->periodic_sched_assigned))
 		ret_val |= DWC_OTG_TRANSACTION_PERIODIC;
 
@@ -1629,7 +2111,7 @@ static void process_periodic_channels(dwc_otg_hcd_t * hcd)
 	hptxsts_data_t tx_status;
 	dwc_list_link_t *qh_ptr;
 	dwc_otg_qh_t *qh;
-	int status;
+	int status = 0;
 	int no_queue_space = 0;
 	int no_fifo_space = 0;
 
@@ -1658,27 +2140,34 @@ static void process_periodic_channels(dwc_otg_hcd_t * hcd)
 
 		// Do not send a split start transaction any later than frame .6
 		// Note, we have to schedule a periodic in .5 to make it go in .6
-		if(fiq_split_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
+		if(fiq_fsm_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
 		{
 			qh_ptr = qh_ptr->next;
-			g_next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
+			hcd->fiq_state->next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
 			continue;
 		}
 
-		/*
-		 * Set a flag if we're queuing high-bandwidth in slave mode.
-		 * The flag prevents any halts to get into the request queue in
-		 * the middle of multiple high-bandwidth packets getting queued.
-		 */
-		if (!hcd->core_if->dma_enable && qh->channel->multi_count > 1) {
-			hcd->core_if->queuing_high_bandwidth = 1;
-		}
-		status =
-		    queue_transaction(hcd, qh->channel,
-				      tx_status.b.ptxfspcavail);
-		if (status < 0) {
-			no_fifo_space = 1;
-			break;
+		if (fiq_fsm_enable && fiq_fsm_transaction_suitable(qh)) {
+			if (qh->do_split)
+				fiq_fsm_queue_split_transaction(hcd, qh);
+			else
+				fiq_fsm_queue_isoc_transaction(hcd, qh);
+		} else {
+
+			/*
+			 * Set a flag if we're queueing high-bandwidth in slave mode.
+			 * The flag prevents any halts to get into the request queue in
+			 * the middle of multiple high-bandwidth packets getting queued.
+			 */
+			if (!hcd->core_if->dma_enable && qh->channel->multi_count > 1) {
+				hcd->core_if->queuing_high_bandwidth = 1;
+			}
+			status = queue_transaction(hcd, qh->channel,
+							tx_status.b.ptxfspcavail);
+			if (status < 0) {
+				no_fifo_space = 1;
+				break;
+			}
 		}
 
 		/*
@@ -1793,32 +2282,26 @@ static void process_non_periodic_channels(dwc_otg_hcd_t * hcd)
 		}
 
 		qh = DWC_LIST_ENTRY(hcd->non_periodic_qh_ptr, dwc_otg_qh_t,
-				    qh_list_entry);
+				qh_list_entry);
 
-		// Do not send a split start transaction any later than frame .5
-		// non periodic transactions will start immediately in this uframe
-		if(fiq_split_enable && qh->do_split && ((dwc_otg_hcd_get_frame_number(hcd) + 1) & 7) > 6)
-		{
-			g_next_sched_frame = dwc_otg_hcd_get_frame_number(hcd) | 7;
-			break;
+		if(fiq_fsm_enable && fiq_fsm_transaction_suitable(qh)) {
+			fiq_fsm_queue_split_transaction(hcd, qh);
+		} else {
+			status = queue_transaction(hcd, qh->channel,
+						tx_status.b.nptxfspcavail);
+
+			if (status > 0) {
+				more_to_do = 1;
+			} else if (status < 0) {
+				no_fifo_space = 1;
+				break;
+			}
 		}
-
-		status =
-		    queue_transaction(hcd, qh->channel,
-				      tx_status.b.nptxfspcavail);
-
-		if (status > 0) {
-			more_to_do = 1;
-		} else if (status < 0) {
-			no_fifo_space = 1;
-			break;
-		}
-
 		/* Advance to next QH, skipping start-of-list entry. */
 		hcd->non_periodic_qh_ptr = hcd->non_periodic_qh_ptr->next;
 		if (hcd->non_periodic_qh_ptr == &hcd->non_periodic_sched_active) {
 			hcd->non_periodic_qh_ptr =
-			    hcd->non_periodic_qh_ptr->next;
+					hcd->non_periodic_qh_ptr->next;
 		}
 
 	} while (hcd->non_periodic_qh_ptr != orig_qh_ptr);
@@ -1879,7 +2362,6 @@ void dwc_otg_hcd_queue_transactions(dwc_otg_hcd_t * hcd,
 	if ((tr_type == DWC_OTG_TRANSACTION_PERIODIC ||
 	     tr_type == DWC_OTG_TRANSACTION_ALL) &&
 	    !DWC_LIST_EMPTY(&hcd->periodic_sched_assigned)) {
-
 		process_periodic_channels(hcd);
 	}
 
@@ -3438,7 +3920,6 @@ uint8_t dwc_otg_hcd_get_ep_bandwidth(dwc_otg_hcd_t * hcd, void *ep_handle)
 
 void dwc_otg_hcd_dump_state(dwc_otg_hcd_t * hcd)
 {
-#ifdef DEBUG
 	int num_channels;
 	int i;
 	gnptxsts_data_t np_tx_status;
@@ -3556,7 +4037,6 @@ void dwc_otg_hcd_dump_state(dwc_otg_hcd_t * hcd)
 	DWC_PRINTF
 	    ("************************************************************\n");
 	DWC_PRINTF("\n");
-#endif
 }
 
 #ifdef DEBUG

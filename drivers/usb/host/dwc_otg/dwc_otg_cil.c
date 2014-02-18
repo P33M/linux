@@ -2873,7 +2873,6 @@ void dwc_otg_hc_start_transfer(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 	hcchar.b.chen = 1;
 	hcchar.b.chdis = 0;
 	DWC_WRITE_REG32(&hc_regs->hcchar, hcchar.d32);
-
 	hc->xfer_started = 1;
 	hc->requests++;
 

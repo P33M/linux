@@ -1188,7 +1188,7 @@ void notrace dwc_otg_fiq_nop(struct fiq_state *state)
 	gintsts_handled.d32 = 0;
 
 	if (gintsts.b.sofintr) {
-		if (state->kick_np_queues &&
+		if (!state->kick_np_queues &&
 				dwc_frame_num_gt(state->next_sched_frame, hfnum.b.frnum)) {
 			/* SOF handled, no work to do, just ACK interrupt */
 			gintsts_handled.b.sofintr = 1;

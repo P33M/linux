@@ -442,6 +442,7 @@ static int notrace noinline fiq_fsm_update_hs_isoc(struct fiq_state *state, int 
 	 * the core needs to be told to send the correct number. Caution: for IN transfers,
 	 * this is always set to the maximum size of the endpoint. */
 	xfer_len = st->hs_isoc_info.iso_desc[st->hs_isoc_info.index].length;
+	/* Integer divide in a FIQ: fun. FIXME: make this not suck */
 	nrpackets = (xfer_len + st->hcchar_copy.b.mps - 1) / st->hcchar_copy.b.mps;
 	if (nrpackets == 0)
 		nrpackets = 1;
@@ -513,6 +514,11 @@ static int notrace noinline fiq_fsm_do_sof(struct fiq_state *state, int num_chan
 		case FIQ_NP_SSPLIT_RETRY:
 		case FIQ_NP_IN_CSPLIT_RETRY:
 		case FIQ_NP_OUT_CSPLIT_RETRY:
+			fiq_fsm_restart_channel(state, n, 0);
+			break;
+			
+		case FIQ_HS_ISOC_SLEEPING:
+			state->channel[n].fsm = FIQ_HS_ISOC_TURBO;
 			fiq_fsm_restart_channel(state, n, 0);
 			break;
 			
@@ -629,6 +635,7 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 	switch (st->fsm) {
 	
 	case FIQ_PASSTHROUGH:
+	case FIQ_DEQUEUE_ISSUED:
 		/* doesn't belong to us, kick it upstairs */
 		break;
 
@@ -951,8 +958,10 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 			/* more transactions to come */
 			handled = 1;
 			restart = 1;
+			fiq_print(FIQDBG_INT, state, "HSISO M ");
 		} else {
 			st->fsm = FIQ_HS_ISOC_DONE;
+			fiq_print(FIQDBG_INT, state, "HSISO F ");
 		}
 		break;
 

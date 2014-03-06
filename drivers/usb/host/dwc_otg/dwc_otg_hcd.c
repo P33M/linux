@@ -615,6 +615,7 @@ int dwc_otg_hcd_urb_dequeue(dwc_otg_hcd_t * hcd,
 	if (urb_qtd->in_process && qh->channel) {
 		/* The QTD is in process (it has been assigned to a channel). */
 		if (hcd->flags.b.port_connect_status) {
+			int n = qh->channel->hc_num;
 			/*
 			 * If still connected (i.e. in host mode), halt the
 			 * channel so it can be used for other transfers. If
@@ -622,6 +623,11 @@ int dwc_otg_hcd_urb_dequeue(dwc_otg_hcd_t * hcd,
 			 * written to halt the channel since the core is in
 			 * device mode.
 			 */
+			/* In FIQ FSM mode, we need to shut down carefully.
+			 * The FIQ may attempt to restart a disabled channel */
+			if (fiq_fsm_enable && (hcd->fiq_state->channel[n].fsm != FIQ_PASSTHROUGH)) {
+				hcd->fiq_state->channel[n].fsm = FIQ_DEQUEUE_ISSUED;
+			}
 			dwc_otg_hc_halt(hcd->core_if, qh->channel,
 					DWC_OTG_HC_XFER_URB_DEQUEUE);
 
@@ -1467,9 +1473,7 @@ int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh)
 					return 0;
 				}
 			}
-			/* return 1; */
-			/* HS isoc is NYI */
-			return 0;
+			return 1;
 		}
 	}
 	return 0;
@@ -1567,6 +1571,16 @@ int fiq_fsm_setup_periodic_dma(dwc_otg_hcd_t *hcd, struct fiq_channel_state *st,
 	}
 }
 
+/*
+ * Pushing a periodic request into the queue near the EOF1 point
+ * in a microframe causes erroneous behaviour (frmovrun) interrupt.
+ * Usually, the request goes out on the bus causing a transfer but
+ * the core does not transfer the data to memory.
+ * This guard interval (in number of 60MHz clocks) is required which
+ * must cater for CPU latency between reading the value and enabling
+ * the channel.
+ */
+#define PERIODIC_FRREM_BACKOFF 1000
 
 int fiq_fsm_queue_isoc_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 {
@@ -1577,6 +1591,7 @@ int fiq_fsm_queue_isoc_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	struct fiq_channel_state *st = &hcd->fiq_state->channel[hc->hc_num];
 	int xfer_len, nrpackets;
 	hcdma_data_t hcdma;
+	hfnum_data_t hfnum;
 	
 	if (st->fsm != FIQ_PASSTHROUGH) 
 		return 0;
@@ -1601,7 +1616,9 @@ int fiq_fsm_queue_isoc_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	st->hcsplt_copy.d32 = 0;
 	
 	st->hs_isoc_info.iso_desc = (struct dwc_otg_hcd_iso_packet_desc *) &qtd->urb->iso_descs;
+	st->hs_isoc_info.nrframes = qtd->urb->packet_count;
 	/* grab the next DMA address offset from the array */
+	st->hcdma_copy.d32 = qtd->urb->dma;
 	hcdma.d32 = st->hcdma_copy.d32 + st->hs_isoc_info.iso_desc[0].offset;
 
 	/* We need to set multi_count. This is a bit tricky - has to be set per-transaction as
@@ -1628,8 +1645,8 @@ int fiq_fsm_queue_isoc_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 		}
 
 	} else {
-		switch (st->hcchar_copy.b.multicnt) {
 		st->hctsiz_copy.b.xfersize = nrpackets * st->hcchar_copy.b.mps;
+		switch (st->hcchar_copy.b.multicnt) {
 		case 1:
 			st->hctsiz_copy.b.pid = DWC_PID_DATA0;
 			break;
@@ -1643,18 +1660,28 @@ int fiq_fsm_queue_isoc_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 	}
 
 	fiq_print(FIQDBG_INT, hcd->fiq_state, "FSMQ  %01d ", hc->hc_num);
-	fiq_print(FIQDBG_INT, hcd->fiq_state, "MULT: %02d", st->hcchar_copy.b.multicnt);
-	fiq_print(FIQDBG_INT, hcd->fiq_state, "NPTK: %02d", st->hctsiz_copy.b.pktcnt);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hcchar_copy.d32);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hctsiz_copy.d32);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hcdma_copy.d32);
+	hfnum.d32 = DWC_READ_REG32(&hcd->core_if->host_if->host_global_regs->hfnum);
 	local_fiq_disable();
-	st->fsm = FIQ_HS_ISOC_TURBO;
 	DWC_WRITE_REG32(&hc_regs->hctsiz, st->hctsiz_copy.d32);
 	DWC_WRITE_REG32(&hc_regs->hcsplt, st->hcsplt_copy.d32);
 	DWC_WRITE_REG32(&hc_regs->hcdma, st->hcdma_copy.d32);
 	DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
 	DWC_WRITE_REG32(&hc_regs->hcintmsk, st->hcintmsk_copy.d32);
-	st->hcchar_copy.b.chen = 1;
-	DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
+	if (hfnum.b.frrem < PERIODIC_FRREM_BACKOFF) {
+		/* Prevent queueing near EOF1. Bad things happen if a periodic
+		 * split transaction is queued very close to EOF.
+		 */
+		st->fsm = FIQ_HS_ISOC_SLEEPING;
+	} else {
+		st->fsm = FIQ_HS_ISOC_TURBO;
+		st->hcchar_copy.b.chen = 1;
+		DWC_WRITE_REG32(&hc_regs->hcchar, st->hcchar_copy.d32);
+	}
 	mb();
+	st->hcchar_copy.b.chen = 0;
 	local_fiq_enable();
 	return 0;
 }
@@ -1782,7 +1809,7 @@ int fiq_fsm_queue_split_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 		hfnum.d32 = DWC_READ_REG32(&hcd->core_if->host_if->host_global_regs->hfnum);
 		frame = (hfnum.b.frnum & ~0x7) >> 3;
 		uframe = hfnum.b.frnum & 0x7;
-		if (hfnum.b.frrem < 1600) {
+		if (hfnum.b.frrem < PERIODIC_FRREM_BACKOFF) {
 			/* Prevent queueing near EOF1. Bad things happen if a periodic
 			 * split transaction is queued very close to EOF.
 			 */

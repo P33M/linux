@@ -205,7 +205,7 @@ enum fiq_fsm_state {
 	FIQ_HS_ISOC_SLEEPING = 24,
 	FIQ_HS_ISOC_DONE = 25,
 	FIQ_HS_ISOC_ABORTED = 26,
-
+	FIQ_DEQUEUE_ISSUED = 30,
 	FIQ_TEST = 32,
 };
 

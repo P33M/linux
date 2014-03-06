@@ -2270,9 +2270,11 @@ void dwc_otg_fiq_unmangle_isoc(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh, dwc_otg_qtd
 		} else if (frame_hcint.b.xacterr) {
 			dwc_urb->iso_descs[i].status = -DWC_E_PROTOCOL;
 			dwc_urb->error_count++;
+			dwc_urb->iso_descs[i].actual_length = 0;
 		} else if (frame_hcint.b.bblerr) {
 			dwc_urb->iso_descs[i].status = -DWC_E_OVERFLOW;
 			dwc_urb->error_count++;
+			dwc_urb->iso_descs[i].actual_length = 0;
 		} else {
 			/* Something went wrong */
 			dwc_urb->iso_descs[i].status = -1;
@@ -2280,10 +2282,10 @@ void dwc_otg_fiq_unmangle_isoc(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh, dwc_otg_qtd
 			dwc_urb->error_count++;
 		}
 	}
-	i -= 1;
-	printk_ratelimited(KERN_INFO "%s: HS isochronous of %d/%d frames with %d errors complete\n",
-				__FUNCTION__, i, dwc_urb->packet_count, dwc_urb->error_count);
+	//printk_ratelimited(KERN_INFO "%s: HS isochronous of %d/%d frames with %d errors complete\n",
+	//			__FUNCTION__, i, dwc_urb->packet_count, dwc_urb->error_count);
 	hcd->fops->complete(hcd, dwc_urb->priv, dwc_urb, 0);
+	release_channel(hcd, qh->channel, qtd, DWC_OTG_HC_XFER_URB_COMPLETE);
 }
 
 /**
@@ -2354,6 +2356,12 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 	hostchannels = hcd->available_host_channels;
 	switch (st->fsm) {
 	case FIQ_TEST:
+		break;
+	
+	case FIQ_DEQUEUE_ISSUED:
+		/* hc_halt was called. QTD no longer exists. */
+		release_channel(hcd, hc, NULL, hc->halt_status);
+		ret = 1;
 		break;
 		
 	case FIQ_NP_SPLIT_DONE:

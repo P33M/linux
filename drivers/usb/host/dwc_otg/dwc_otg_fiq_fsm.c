@@ -57,7 +57,7 @@ char buffer[1000*16];
 int wptr;
 void _fiq_print(enum fiq_debug_level dbg_lvl, volatile struct fiq_state *state, char *fmt, ...)
 {
-	enum fiq_debug_level dbg_lvl_req = FIQDBG_INT;
+	enum fiq_debug_level dbg_lvl_req = FIQDBG_ERR;
 	va_list args;
 	char text[17];
 	hfnum_data_t hfnum = { .d32 = FIQ_READ(state->dwc_regs_base + 0x408) };
@@ -503,11 +503,30 @@ static int notrace noinline fiq_fsm_update_hs_isoc(struct fiq_state *state, int 
  * the timing granularity required to achieve optimal throughout. The workaround is to use
  * the SOF "timer" (125uS) to perform this task.
  */
+hfnum_data_t last_sof = { .d32 = ~0 };
+static int derp = 0;
+static int timestamp = 0;
 static int notrace noinline fiq_fsm_do_sof(struct fiq_state *state, int num_channels)
 {
 	hfnum_data_t hfnum = { .d32 = FIQ_READ(state->dwc_regs_base + HFNUM) };
-	int n; 
-	
+	int n;
+	unsigned int delta;
+	if (last_sof.d32 == ~0)
+		last_sof = hfnum;
+	else {
+		if (hfnum.b.frnum == 0x0008)
+			timestamp++;
+		delta = (hfnum.b.frnum - last_sof.b.frnum) & 0x3FFF;
+		if (delta > 1) {
+			fiq_print(FIQDBG_ERR, state, "DT:%05u", delta);
+			fiq_print(FIQDBG_ERR, state, "%08u", timestamp);
+			derp++;
+		}
+		if (delta > 100)
+			BUG();
+		last_sof = hfnum;
+
+	}
 	for (n = 0; n < num_channels; n++) {
 		switch (state->channel[n].fsm) {
 		
@@ -897,15 +916,6 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 			BUG();
 		}
 		break;
-		
-	case FIQ_PER_CSPLIT_NYET_FAFF:
-		/* This is in response to a host channel disable.
-		 * Poke the channel again. */
-		fiq_print(FIQDBG_INT, state, "FAFF: %01d ", n);
-		handled = 1;
-		restart = 1;
-		st->fsm = FIQ_PER_CSPLIT_POLL;
-		break;
 	
 	case FIQ_PER_CSPLIT_POLL:
 		hfnum.d32 = FIQ_READ(state->dwc_regs_base + HFNUM);
@@ -1023,8 +1033,6 @@ static int notrace noinline fiq_fsm_do_hcintr(struct fiq_state *state, int num_c
 		break;
 	}
 
-
-
 	if (handled) {
 		FIQ_WRITE(state->dwc_regs_base + HC_START + (HC_OFFSET * n) + HCINT, hcint.d32);
 	} else {
@@ -1089,6 +1097,7 @@ void notrace dwc_otg_fiq_fsm(struct fiq_state *state, int num_channels)
 		 * certain stages of the periodic pipeline. It's death to mask this
 		 * interrupt in that case.
 		 */
+
 		if (!fiq_fsm_do_sof(state, num_channels)) {
 			/* Kick IRQ once. Queue advancement means that all pending transactions
 			 * will get serviced when the IRQ finally executes.

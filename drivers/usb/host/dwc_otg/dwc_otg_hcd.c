@@ -1551,6 +1551,9 @@ int fiq_fsm_setup_periodic_dma(dwc_otg_hcd_t *hcd, struct fiq_channel_state *st,
 				} while (i <= nrslots - 1);
 				st->nrpackets = i;
 			}
+			ptr = qtd->urb->buf + frame_desc->offset;
+			if(DWC_MEMCMP(&blob->channel[hc->hc_num].index[0].buf[0], ptr, frame_length))
+				BUG();
 			/* Point the HC at the DMA address of the bounce buffers */
 			blob = (struct fiq_dma_blob *) hcd->fiq_state->dma_base;
 			/* Bugette: for some reason, memcpy corrupts the data in the bounce buffers. May be a
@@ -1848,9 +1851,10 @@ int fiq_fsm_queue_split_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh)
 		}
 	}
 	fiq_print(FIQDBG_INT, hcd->fiq_state, "FSMQ %01d %01d", hc->hc_num, start_immediate);
-	fiq_print(FIQDBG_INT, hcd->fiq_state, "H:%02dP:%02d", hub_addr, port_addr);
-	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hctsiz_copy.d32);
-	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hcdma_copy.d32);
+	fiq_print(FIQDBG_INT, hcd->fiq_state, "%08d", hfnum.b.frrem);
+	//fiq_print(FIQDBG_INT, hcd->fiq_state, "H:%02dP:%02d", hub_addr, port_addr);
+	//fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hctsiz_copy.d32);
+	//fiq_print(FIQDBG_INT, hcd->fiq_state, "%08x", st->hcdma_copy.d32);
 	switch (hc->ep_type) {
 		case UE_CONTROL:
 		case UE_BULK:

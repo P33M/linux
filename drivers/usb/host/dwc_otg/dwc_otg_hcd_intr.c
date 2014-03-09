@@ -215,6 +215,7 @@ exit_handler_routine:
 		if ((gintmsk_new.d32 == ~0) && (haintmsk_new.d32 == 0x0000FFFF)) {
 				DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.intstat, (1<<16));
 				if (dwc_otg_hcd->fiq_state->mphi_int_count >= 50) {
+					fiq_print(FIQDBG_INT, dwc_otg_hcd->fiq_state, "MPHI CLR");
 					DWC_WRITE_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl, ((1<<31) + (1<<16)));
 					while (!(DWC_READ_REG32(dwc_otg_hcd->fiq_state->mphi_regs.ctrl) & (1 << 17)))
 						;
@@ -2360,6 +2361,9 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 	
 	case FIQ_DEQUEUE_ISSUED:
 		/* hc_halt was called. QTD no longer exists. */
+		/* TODO: for a nonperiodic split transaction, need to issue a
+		 * CLEAR_TT_BUFFER hub command if we were in the start-split phase.
+		 */
 		release_channel(hcd, hc, NULL, hc->halt_status);
 		ret = 1;
 		break;
@@ -2379,7 +2383,10 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 	
 	case FIQ_NP_SPLIT_HS_ABORTED:
 		/* A HS abort is a 3-strikes on the HS bus at any point in the transaction.
-		 * Assume that the data did not make it (nonperiodic ensure reliable traffic) */
+		 * Normally a CLEAR_TT_BUFFER hub command would be required: we can't do that
+		 * because there's no guarantee which order a non-periodic split happened in.
+		 * We could end up clearing a perfectly good transaction out of the buffer.
+		 */
 		if (hcint.b.xacterr) {
 			qtd->error_count += st->nr_errors;
 			handle_hc_xacterr_intr(hcd, hc, hc_regs, qtd);
@@ -2532,7 +2539,8 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 	case FIQ_PER_SPLIT_LS_ABORTED:
 		if (hcint.b.xacterr) {
 			/* Hub has responded with an ERR packet. Device
-			 * has been unplugged or the port has been disabled. */
+			 * has been unplugged or the port has been disabled.
+			 * TODO: need to issue a reset to the hub port. */
 			qtd->error_count += 3;
 			handle_hc_xacterr_intr(hcd, hc, hc_regs, qtd);
 		} else {
@@ -2544,8 +2552,12 @@ int32_t dwc_otg_hcd_handle_hc_fsm(dwc_otg_hcd_t *hcd, uint32_t num)
 		break;
 		
 	case FIQ_PER_SPLIT_HS_ABORTED:
-		local_fiq_disable();
-		BUG();
+		/* Either the SSPLIT phase suffered transaction errors or something
+		 * unexpected happened.
+		 */
+		qtd->error_count += 3;
+		handle_hc_xacterr_intr(hcd, hc, hc_regs, qtd);
+		release_channel(hcd, hc, qtd, DWC_OTG_HC_XFER_NO_HALT_STATUS);
 		break;
 
 	case FIQ_PER_SPLIT_TIMEOUT:

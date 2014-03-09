@@ -131,7 +131,7 @@ enum fiq_debug_level {
 struct fiq_state;
 
 extern void _fiq_print (enum fiq_debug_level dbg_lvl, volatile struct fiq_state *state, char *fmt, ...);
-#if 0
+#if 1
 #define fiq_print _fiq_print
 #else
 #define fiq_print(x, y, ...)

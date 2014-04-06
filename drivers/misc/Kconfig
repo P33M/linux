@@ -4,6 +4,12 @@
 
 menu "Misc devices"
 
+config IRQ_FUZZER
+	tristate "IRQ latency fuzzer (to break dwc_otg)"
+	default n
+	help
+		BLAH
+
 config SENSORS_LIS3LV02D
 	tristate
 	depends on INPUT

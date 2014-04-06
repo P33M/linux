@@ -226,9 +226,9 @@ exit_handler_routine:
 			//dwc_list_link_t *cur;
 			/* Once a second output the fiq and irq numbers, useful for debug */
 			last_time = jiffies / HZ;
-		//	 DWC_WARN("np_kick=%d AHC=%d sched_frame=%d cur_frame=%d int_done=%d fiq_done=%d",
-		//	dwc_otg_hcd->fiq_state->kick_np_queues, dwc_otg_hcd->available_host_channels,
-		//	dwc_otg_hcd->fiq_state->next_sched_frame, hfnum.b.frnum, int_done, dwc_otg_hcd->fiq_state->fiq_done);
+			// DWC_WARN("np_kick=%d AHC=%d sched_frame=%d cur_frame=%d int_done=%d fiq_done=%d",
+			//dwc_otg_hcd->fiq_state->kick_np_queues, dwc_otg_hcd->available_host_channels,
+			//dwc_otg_hcd->fiq_state->next_sched_frame, hfnum.b.frnum, int_done, dwc_otg_hcd->fiq_state->fiq_done);
 			 //printk(KERN_WARNING "Periodic queues:\n");
 		}
 	}

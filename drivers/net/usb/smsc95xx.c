@@ -171,6 +171,8 @@ static int __must_check __smsc95xx_phy_wait_not_busy(struct usbnet *dev,
 	do {
 		ret = __smsc95xx_read_reg(dev, MII_ADDR, &val, in_pm);
 		if (ret < 0) {
+			/* Debug hack: when we break, poke the HCD to dump some state */
+			hcd_is_broken = 1;
 			netdev_warn(dev->net, "Error reading MII_ACCESS\n");
 			return ret;
 		}

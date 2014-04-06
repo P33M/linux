@@ -47,6 +47,8 @@
 #include "dwc_otg_regs.h"
 #include "dwc_otg_fiq_fsm.h"
 
+int hcd_is_broken = 0;
+
 extern bool microframe_schedule;
 extern uint16_t fiq_fsm_mask, nak_holdoff;
 
@@ -1911,7 +1913,7 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 	last_sel_trans_num_nonper_scheduled = 0;
 	last_sel_trans_num_avail_hc_at_start = hcd->available_host_channels;
 #endif /* DEBUG_HOST_CHANNELS */
-
+	uint16_t frame = dwc_otg_hcd_get_frame_number(hcd);
 	/* Process entries in the periodic ready list. */
 	qh_ptr = DWC_LIST_FIRST(&hcd->periodic_sched_ready);
 
@@ -1968,7 +1970,6 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 		if (nak_holdoff && qh->do_split) {
 			if (qh->nak_frame != 0xffff) {
 				uint16_t next_frame = dwc_frame_num_inc(qh->nak_frame, (qh->ep_type == UE_BULK) ? nak_holdoff : 8);
-				uint16_t frame = dwc_otg_hcd_get_frame_number(hcd);
 				if (dwc_frame_num_le(frame, next_frame)) {
 					if(dwc_frame_num_le(next_frame, hcd->fiq_state->next_sched_frame)) {
 						hcd->fiq_state->next_sched_frame = next_frame;
@@ -2035,7 +2036,68 @@ dwc_otg_transaction_type_e dwc_otg_hcd_select_transactions(dwc_otg_hcd_t * hcd)
 	if(!DWC_LIST_EMPTY(&hcd->non_periodic_sched_active))
 		ret_val |= DWC_OTG_TRANSACTION_NON_PERIODIC;
 
-
+	if(hcd_is_broken) {
+		local_fiq_disable();
+		haintmsk_data_t haintmsk = { .d32 = FIQ_READ(hcd->fiq_state->dwc_regs_base + HAINTMSK) };
+		gintmsk_data_t gintmsk = { .d32 = FIQ_READ(hcd->fiq_state->dwc_regs_base + GINTMSK) };
+		haint_data_t haint = { .d32 = FIQ_READ(hcd->fiq_state->dwc_regs_base + HAINT) };
+		local_fiq_enable();
+		printk(KERN_ERR "dwc_otg: AHC=%d gintmsk_saved=0x%08x haintmsk_saved=0x%08x kick_np=%d next_sched_frame=%d\n"
+				"cur_frame=%d haintmsk=0x%08x gintmsk=0x%08x haint=0x%08x\n",
+				hcd->available_host_channels, hcd->fiq_state->gintmsk_saved.d32, hcd->fiq_state->haintmsk_saved.d32,
+				hcd->fiq_state->kick_np_queues, hcd->fiq_state->next_sched_frame, frame, haintmsk.d32, gintmsk.d32,
+				haint.d32);
+		if (fiq_fsm_enable) {
+			int i;
+			for (i = 0; i < hcd->core_if->core_params->host_channels; i++) {
+				printk(KERN_ERR "FIQ channel %d FSM=%d\n",
+						i, hcd->fiq_state->channel[i].fsm);
+			}
+		}
+		printk(KERN_ERR "Queues:\nNon-Periodic Inactive:\n");
+		if (!DWC_LIST_EMPTY(&hcd->non_periodic_sched_inactive)) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->non_periodic_sched_inactive) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				printk(KERN_ERR "    %p\n", qh);
+			}
+		}
+		printk(KERN_ERR "Non-Periodic Active:\n");
+		if (!DWC_LIST_EMPTY(&hcd->non_periodic_sched_active)) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->non_periodic_sched_active) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				printk(KERN_ERR "    %p\n", qh);
+			}
+		}
+		printk(KERN_ERR "Periodic Inactive:\n");
+		if (!DWC_LIST_EMPTY(&hcd->periodic_sched_inactive)) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->periodic_sched_inactive) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				printk(KERN_ERR "    %p\n", qh);
+			}
+		}
+		printk(KERN_ERR "Periodic Ready:\n");
+		if (!DWC_LIST_EMPTY(&hcd->periodic_sched_ready)) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->periodic_sched_ready) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				printk(KERN_ERR "    %p\n", qh);
+			}
+		}
+		printk(KERN_ERR "Periodic Assigned:\n");
+		if (!DWC_LIST_EMPTY(&hcd->periodic_sched_assigned)) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->periodic_sched_assigned) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				printk(KERN_ERR "    %p\n", qh);
+			}
+		}
+		printk(KERN_ERR "Periodic Queued:\n");
+		if (!DWC_LIST_EMPTY(&hcd->periodic_sched_queued)) {
+			DWC_LIST_FOREACH(qh_ptr, &hcd->periodic_sched_queued) {
+				qh = DWC_LIST_ENTRY(qh_ptr, dwc_otg_qh_t, qh_list_entry);
+				printk(KERN_ERR "    %p\n", qh);
+			}
+		}
+		hcd_is_broken = 0;
+	}
 #ifdef DEBUG_HOST_CHANNELS
 	last_sel_trans_num_avail_hc_at_end = hcd->available_host_channels;
 #endif /* DEBUG_HOST_CHANNELS */

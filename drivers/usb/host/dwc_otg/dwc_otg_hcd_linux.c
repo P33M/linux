@@ -536,6 +536,8 @@ int hcd_init(dwc_bus_dev_t *_dev)
 	}
 
 	dwc_otg_hcd_set_priv_data(dwc_otg_hcd, hcd);
+	/* testing 123 */
+	hcd_is_broken = 1;
 	return 0;
 
 error2:

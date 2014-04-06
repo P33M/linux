@@ -189,6 +189,8 @@ struct usb_interface {
 };
 #define	to_usb_interface(d) container_of(d, struct usb_interface, dev)
 
+extern int hcd_is_broken;
+
 static inline void *usb_get_intfdata(struct usb_interface *intf)
 {
 	return dev_get_drvdata(&intf->dev);

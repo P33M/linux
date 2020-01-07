@@ -2361,7 +2361,7 @@ void dwc_otg_hc_init(dwc_otg_core_if_t * core_if, dwc_hc_t * hc)
 	hcchar.b.epdir = hc->ep_is_in;
 	hcchar.b.lspddev = (hc->speed == DWC_OTG_EP_SPEED_LOW);
 	hcchar.b.eptype = hc->ep_type;
-	hcchar.b.mps = hc->max_packet;
+	hcchar.b.mps = min_t(uint32_t, hc->max_packet, hc->xfer_len);
 
 	DWC_WRITE_REG32(&host_if->hc_regs[hc_num]->hcchar, hcchar.d32);
 

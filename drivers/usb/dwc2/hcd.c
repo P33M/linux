@@ -1463,7 +1463,7 @@ static void dwc2_hc_start_transfer(struct dwc2_hsotg *hsotg,
 			 */
 			chan->xfer_len = 0;
 		else if (chan->ep_is_in || chan->xfer_len > chan->max_packet)
-			chan->xfer_len = chan->max_packet;
+			chan->xfer_len = min_t(u32, chan->max_packet, chan->xfer_len);
 		else if (!chan->ep_is_in && chan->xfer_len > 188)
 			chan->xfer_len = 188;
 
@@ -2843,9 +2843,11 @@ static int dwc2_assign_and_init_hc(struct dwc2_hsotg *hsotg, struct dwc2_qh *qh)
 	chan->xfer_count = 0;
 
 	/* Set the split attributes if required */
-	if (qh->do_split)
+	if (qh->do_split) {
+		if (chan->ep_is_in)
+			chan->max_packet = min_t(u32, chan->xfer_len, chan->max_packet);
 		dwc2_hc_init_split(hsotg, chan, qtd, urb);
-	else
+	} else
 		chan->do_split = 0;
 
 	/* Set the transfer attributes */

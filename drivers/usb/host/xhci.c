@@ -38,6 +38,11 @@ static unsigned long long quirks;
 module_param(quirks, ullong, S_IRUGO);
 MODULE_PARM_DESC(quirks, "Bit flags for quirks to be enabled as default");
 
+unsigned int spad;
+module_param(spad, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(spad, "pad segment");
+
+
 static bool td_on_ring(struct xhci_td *td, struct xhci_ring *ring)
 {
 	struct xhci_segment *seg = ring->first_seg;

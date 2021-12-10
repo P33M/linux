@@ -106,16 +106,16 @@ static void xhci_link_segments(struct xhci_segment *prev,
 		return;
 	prev->next = next;
 	if (type != TYPE_EVENT) {
-		prev->trbs[TRBS_PER_SEGMENT-1].link.segment_ptr =
+		prev->trbs[TRBS_PER_SEGMENT-1 - prev->end_pad].link.segment_ptr =
 			cpu_to_le64(next->dma);
 
 		/* Set the last TRB in the segment to have a TRB type ID of Link TRB */
-		val = le32_to_cpu(prev->trbs[TRBS_PER_SEGMENT-1].link.control);
+		val = le32_to_cpu(prev->trbs[TRBS_PER_SEGMENT-1 - prev->end_pad].link.control);
 		val &= ~TRB_TYPE_BITMASK;
 		val |= TRB_TYPE(TRB_LINK);
 		if (chain_links)
 			val |= TRB_CHAIN;
-		prev->trbs[TRBS_PER_SEGMENT-1].link.control = cpu_to_le32(val);
+		prev->trbs[TRBS_PER_SEGMENT-1 - prev->end_pad].link.control = cpu_to_le32(val);
 	}
 }
 
@@ -142,12 +142,12 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	xhci_link_segments(ring->enq_seg, first, ring->type, chain_links);
 	xhci_link_segments(last, next, ring->type, chain_links);
 	ring->num_segs += num_segs;
-	ring->num_trbs_free += (TRBS_PER_SEGMENT - 1) * num_segs;
+	ring->num_trbs_free += (TRBS_PER_SEGMENT-1 - next->end_pad) * num_segs;
 
 	if (ring->type != TYPE_EVENT && ring->enq_seg == ring->last_seg) {
-		ring->last_seg->trbs[TRBS_PER_SEGMENT-1].link.control
+		ring->last_seg->trbs[TRBS_PER_SEGMENT-1 - last->end_pad].link.control
 			&= ~cpu_to_le32(LINK_TOGGLE);
-		last->trbs[TRBS_PER_SEGMENT-1].link.control
+		last->trbs[TRBS_PER_SEGMENT-1 - last->end_pad].link.control
 			|= cpu_to_le32(LINK_TOGGLE);
 		ring->last_seg = last;
 	}
@@ -296,11 +296,13 @@ void xhci_ring_free(struct xhci_hcd *xhci, struct xhci_ring *ring)
 void xhci_initialize_ring_info(struct xhci_ring *ring,
 			       unsigned int cycle_state)
 {
+	int end_pad;
 	/* The ring is empty, so the enqueue pointer == dequeue pointer */
 	ring->enqueue = ring->first_seg->trbs;
 	ring->enq_seg = ring->first_seg;
 	ring->dequeue = ring->enqueue;
 	ring->deq_seg = ring->first_seg;
+	end_pad = ring->deq_seg->end_pad;
 	/* The ring is initialized to 0. The producer must write 1 to the cycle
 	 * bit to handover ownership of the TRB, so PCS = 1.  The consumer must
 	 * compare CCS to the cycle bit to check ownership, so CCS = 1.
@@ -314,7 +316,7 @@ void xhci_initialize_ring_info(struct xhci_ring *ring,
 	 * Each segment has a link TRB, and leave an extra TRB for SW
 	 * accounting purpose
 	 */
-	ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - 1) - 1;
+	ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - end_pad - 1) - 1;
 }
 
 /* Allocate segments and link them for a ring */
@@ -336,6 +338,17 @@ static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
 		return -ENOMEM;
 	num_segs--;
 
+	/*
+	 * The Via VL805 has a bug where cache readahead will fetch off the end
+	 * of a page if the Link TRB of a transfer ring is in the last 4 slots.
+	 * Where there are consecutive physical pages containing ring segments,
+	 * this can cause a desync between the controller's view of a ring
+	 * and the host.
+	 */
+	if(xhci->quirks & XHCI_VLI_TRB_CACHE_BUG &&
+	   type != TYPE_EVENT && type != TYPE_COMMAND)
+		prev->end_pad = 4;
+
 	*first = prev;
 	while (num_segs > 0) {
 		struct xhci_segment	*next;
@@ -351,7 +364,7 @@ static int xhci_alloc_segments_for_ring(struct xhci_hcd *xhci,
 			return -ENOMEM;
 		}
 		xhci_link_segments(prev, next, type, chain_links);
-
+		next->end_pad = prev->end_pad;
 		prev = next;
 		num_segs--;
 	}
@@ -374,6 +387,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 {
 	struct xhci_ring	*ring;
 	int ret;
+	unsigned int end_pad;
 	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
 
 	ring = kzalloc_node(sizeof(*ring), flags, dev_to_node(dev));
@@ -393,10 +407,11 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 	if (ret)
 		goto fail;
 
+	end_pad = ring->last_seg->end_pad;
 	/* Only event ring does not use link TRB */
 	if (type != TYPE_EVENT) {
 		/* See section 4.9.2.1 and 6.4.4.1 */
-		ring->last_seg->trbs[TRBS_PER_SEGMENT - 1].link.control |=
+		ring->last_seg->trbs[TRBS_PER_SEGMENT-1 - end_pad].link.control |=
 			cpu_to_le32(LINK_TOGGLE);
 	}
 	xhci_initialize_ring_info(ring, cycle_state);
@@ -427,10 +442,11 @@ int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	struct xhci_segment	*last;
 	unsigned int		num_segs;
 	unsigned int		num_segs_needed;
+	unsigned int		end_pad = ring->last_seg->end_pad;
 	int			ret;
 
-	num_segs_needed = (num_trbs + (TRBS_PER_SEGMENT - 1) - 1) /
-				(TRBS_PER_SEGMENT - 1);
+	num_segs_needed = (num_trbs + (TRBS_PER_SEGMENT - end_pad - 1) - 1) /
+				(TRBS_PER_SEGMENT - end_pad - 1);
 
 	/* Allocate number of segments we needed, or double the ring size */
 	num_segs = ring->num_segs > num_segs_needed ?

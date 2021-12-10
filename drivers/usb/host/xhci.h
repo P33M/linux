@@ -1533,6 +1533,8 @@ struct xhci_segment {
 	void			*bounce_buf;
 	unsigned int		bounce_offs;
 	unsigned int		bounce_len;
+	/* Shrink the segment by a certain amount */
+	unsigned int		end_pad;
 };
 
 struct xhci_td {

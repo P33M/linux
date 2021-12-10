@@ -59,7 +59,6 @@
 #include "xhci-trace.h"
 #include "xhci-mtk.h"
 
-extern unsigned int spad;
 /*
  * Returns zero if the TRB isn't in this segment, otherwise it returns the DMA
  * address of the TRB.

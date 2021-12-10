@@ -25,7 +25,6 @@
  * Section 4.11.1.1:
  * "All components of all Command and Transfer TRBs shall be initialized to '0'"
  */
-extern unsigned int spad;
 static struct xhci_segment *xhci_segment_alloc(struct xhci_hcd *xhci,
 					       unsigned int cycle_state,
 					       unsigned int max_packet,
@@ -107,16 +106,16 @@ static void xhci_link_segments(struct xhci_segment *prev,
 		return;
 	prev->next = next;
 	if (type != TYPE_EVENT) {
-		prev->trbs[TRBS_PER_SEGMENT - spad - 1].link.segment_ptr =
+		prev->trbs[TRBS_PER_SEGMENT-1].link.segment_ptr =
 			cpu_to_le64(next->dma);
 
 		/* Set the last TRB in the segment to have a TRB type ID of Link TRB */
-		val = le32_to_cpu(prev->trbs[TRBS_PER_SEGMENT - spad - 1].link.control);
+		val = le32_to_cpu(prev->trbs[TRBS_PER_SEGMENT-1].link.control);
 		val &= ~TRB_TYPE_BITMASK;
 		val |= TRB_TYPE(TRB_LINK);
 		if (chain_links)
 			val |= TRB_CHAIN;
-		prev->trbs[TRBS_PER_SEGMENT - spad - 1].link.control = cpu_to_le32(val);
+		prev->trbs[TRBS_PER_SEGMENT-1].link.control = cpu_to_le32(val);
 	}
 }
 
@@ -143,12 +142,12 @@ static void xhci_link_rings(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	xhci_link_segments(ring->enq_seg, first, ring->type, chain_links);
 	xhci_link_segments(last, next, ring->type, chain_links);
 	ring->num_segs += num_segs;
-	ring->num_trbs_free += (TRBS_PER_SEGMENT - spad - 1) * num_segs;
+	ring->num_trbs_free += (TRBS_PER_SEGMENT - 1) * num_segs;
 
 	if (ring->type != TYPE_EVENT && ring->enq_seg == ring->last_seg) {
-		ring->last_seg->trbs[TRBS_PER_SEGMENT - spad - 1].link.control
+		ring->last_seg->trbs[TRBS_PER_SEGMENT-1].link.control
 			&= ~cpu_to_le32(LINK_TOGGLE);
-		last->trbs[TRBS_PER_SEGMENT - spad - 1].link.control
+		last->trbs[TRBS_PER_SEGMENT-1].link.control
 			|= cpu_to_le32(LINK_TOGGLE);
 		ring->last_seg = last;
 	}
@@ -315,10 +314,7 @@ void xhci_initialize_ring_info(struct xhci_ring *ring,
 	 * Each segment has a link TRB, and leave an extra TRB for SW
 	 * accounting purpose
 	 */
-	if(ring->type != TYPE_EVENT)
-		ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - spad) - 1;
-	else
-		ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - 1) - 1;
+	ring->num_trbs_free = ring->num_segs * (TRBS_PER_SEGMENT - 1) - 1;
 }
 
 /* Allocate segments and link them for a ring */
@@ -400,7 +396,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_hcd *xhci,
 	/* Only event ring does not use link TRB */
 	if (type != TYPE_EVENT) {
 		/* See section 4.9.2.1 and 6.4.4.1 */
-		ring->last_seg->trbs[TRBS_PER_SEGMENT - spad - 1].link.control |=
+		ring->last_seg->trbs[TRBS_PER_SEGMENT - 1].link.control |=
 			cpu_to_le32(LINK_TOGGLE);
 	}
 	xhci_initialize_ring_info(ring, cycle_state);
@@ -433,8 +429,8 @@ int xhci_ring_expansion(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	unsigned int		num_segs_needed;
 	int			ret;
 
-	num_segs_needed = (num_trbs + (TRBS_PER_SEGMENT - spad - 1) - 1) /
-				(TRBS_PER_SEGMENT - spad - 1);
+	num_segs_needed = (num_trbs + (TRBS_PER_SEGMENT - 1) - 1) /
+				(TRBS_PER_SEGMENT - 1);
 
 	/* Allocate number of segments we needed, or double the ring size */
 	num_segs = ring->num_segs > num_segs_needed ?

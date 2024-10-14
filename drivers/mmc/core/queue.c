@@ -274,6 +274,8 @@ static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 			return BLK_STS_RESOURCE;
 		}
 		break;
+
+		break;
 	default:
 		/*
 		 * Timeouts are handled by mmc core, and we don't have a host
@@ -292,9 +294,12 @@ static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (req_op(req) == REQ_OP_WRITE)
 		mq->pending_writes++;
 	mq->in_flight[issue_type] += 1;
-	get_card = (mmc_tot_in_flight(mq) == 1);
-	cqe_retune_ok = (mmc_cqe_qcnt(mq) == 1);
+	get_card = (mmc_tot_in_flight(mq) == 1) || (mq->in_flight[MMC_ISSUE_SYNC] == 1);
+	cqe_retune_ok = (mmc_cqe_qcnt(mq) == 1) && (mq->in_flight[MMC_ISSUE_SYNC] == 0);
 
+	pr_info("%s: req %u ctx %p get_card %u claim_count %u qcnt %u/%u/%u \n", 
+			 mmc_hostname(host), req_op(req), &mq->ctx, get_card, host->claim_cnt, 
+			 mq->in_flight[MMC_ISSUE_SYNC], mq->in_flight[MMC_ISSUE_ASYNC], mq->in_flight[MMC_ISSUE_DCMD]);
 	spin_unlock_irq(&mq->lock);
 
 	if (!(req->rq_flags & RQF_DONTPREP)) {
@@ -330,17 +335,29 @@ static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 		bool put_card = false;
 
 		spin_lock_irq(&mq->lock);
+
 		if (req_op(req) == REQ_OP_WRITE)
 			mq->pending_writes--;
 		mq->in_flight[issue_type] -= 1;
-		if (mmc_tot_in_flight(mq) == 0)
+
+		if (mq->in_flight[MMC_ISSUE_SYNC] == 0)
 			put_card = true;
+
+		if (mmc_cqe_qcnt(mq) == 0)
+			put_card = true;
+
 		mq->busy = false;
 		spin_unlock_irq(&mq->lock);
-		if (put_card)
+		if (put_card) {
+			pr_info("%s: req %u ctx %p put_card %u claim_count %u\n",
+			 mmc_hostname(host), req_op(req), &mq->ctx, get_card, host->claim_cnt);
 			mmc_put_card(card, &mq->ctx);
+		}
 	} else {
+		// Sus usage of mq->busy outside lock
+		spin_lock_irq(&mq->lock);
 		WRITE_ONCE(mq->busy, false);
+		spin_unlock_irq(&mq->lock);
 	}
 
 	return ret;

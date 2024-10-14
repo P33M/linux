@@ -807,6 +807,8 @@ int __mmc_claim_host(struct mmc_host *host, struct mmc_ctx *ctx,
 
 	add_wait_queue(&host->wq, &wait);
 	spin_lock_irqsave(&host->lock, flags);
+	pr_info("%s:mmc_claim ctx %p claimed %u claim_count %u\n",
+			 mmc_hostname(host), ctx, host->claimed, host->claim_cnt);
 	while (1) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		stop = abort ? atomic_read(abort) : 0;
@@ -825,6 +827,8 @@ int __mmc_claim_host(struct mmc_host *host, struct mmc_ctx *ctx,
 			pm = true;
 	} else
 		wake_up(&host->wq);
+	pr_info("%s:mmc_claimed ctx %p claimed %u claim_count %u\n",
+			 mmc_hostname(host), ctx, host->claimed, host->claim_cnt);
 	spin_unlock_irqrestore(&host->lock, flags);
 	remove_wait_queue(&host->wq, &wait);
 
@@ -851,8 +855,12 @@ void mmc_release_host(struct mmc_host *host)
 	spin_lock_irqsave(&host->lock, flags);
 	if (--host->claim_cnt) {
 		/* Release for nested claim */
+		pr_info("%s:mmc_release1 ctx %p claimed %u claim_count %u\n",
+			 mmc_hostname(host), host->claimer, host->claimed, host->claim_cnt);
 		spin_unlock_irqrestore(&host->lock, flags);
 	} else {
+		pr_info("%s:mmc_release0 ctx %p claimed %u claim_count %u\n",
+			 mmc_hostname(host), host->claimer, host->claimed, host->claim_cnt);
 		host->claimed = 0;
 		host->claimer->task = NULL;
 		host->claimer = NULL;

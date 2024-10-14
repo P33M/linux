@@ -1557,9 +1557,14 @@ static void mmc_blk_cqe_complete_rq(struct mmc_queue *mq, struct request *req)
 
 	if (req_op(req) == REQ_OP_WRITE)
 		mq->pending_writes--;
+
 	mq->in_flight[issue_type] -= 1;
 
-	put_card = (mmc_tot_in_flight(mq) == 0);
+	pr_info("%s:post_req %u ctx %p claimed %u claim_count %u qcnt %u/%u/%u\n",
+			 mmc_hostname(host), req_op(req), &mq->ctx, host->claimed, host->claim_cnt,  
+			 mq->in_flight[MMC_ISSUE_SYNC], mq->in_flight[MMC_ISSUE_ASYNC], mq->in_flight[MMC_ISSUE_DCMD]);
+
+	put_card = (mmc_cqe_qcnt(mq) == 0);
 
 	mmc_cqe_check_busy(mq);
 
@@ -2073,8 +2078,6 @@ static void mmc_blk_mq_complete_rq(struct mmc_queue *mq, struct request *req)
 	struct mmc_queue_req *mqrq = req_to_mmc_queue_req(req);
 	unsigned int nr_bytes = mqrq->brq.data.bytes_xfered;
 
-	if (req_op(req) == REQ_OP_WRITE)
-		mq->pending_writes--;
 	if (nr_bytes) {
 		if (blk_update_request(req, BLK_STS_OK, nr_bytes))
 			blk_mq_requeue_request(req, true);
